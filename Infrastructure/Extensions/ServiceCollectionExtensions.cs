@@ -38,6 +38,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IFixPolicyRepository,          SqlFixPolicyRepository>();
         services.AddScoped<IScanWatermarkRepository,      SqlScanWatermarkRepository>();
         services.AddScoped<IMonitoredJobLeaseRepository,  SqlMonitoredJobLeaseRepository>();
+        services.AddScoped<IOperatorActionRepository,     SqlOperatorActionRepository>();
 
         // ── Classification strategy (swap for ML/LLM here) ──────────────────
         services.AddScoped<IClassificationStrategy, RuleBasedClassifier>();
