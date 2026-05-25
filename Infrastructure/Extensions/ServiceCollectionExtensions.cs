@@ -39,6 +39,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IScanWatermarkRepository,      SqlScanWatermarkRepository>();
         services.AddScoped<IMonitoredJobLeaseRepository,  SqlMonitoredJobLeaseRepository>();
         services.AddScoped<IOperatorActionRepository,     SqlOperatorActionRepository>();
+        services.AddScoped<IScanRunHistoryRepository,     SqlScanRunHistoryRepository>();
 
         // ── Classification strategy (swap for ML/LLM here) ──────────────────
         services.AddScoped<IClassificationStrategy, RuleBasedClassifier>();
@@ -74,6 +75,7 @@ public static class ServiceCollectionExtensions
 
         // ── Background workers ───────────────────────────────────────────────
         services.AddHostedService<MonitoringWorker>();
+        services.AddHostedService<ScanHistoryRetentionWorker>();
 
         return services;
     }

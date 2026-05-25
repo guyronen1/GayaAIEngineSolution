@@ -1,35 +1,41 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\Guy Ronen\\Documents\\GAYA\\GayaAIEngineSolution\\AIEngineTests\\AIEngineTests.csproj": {}
+    "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\AIEngineTests\\AIEngineTests.csproj": {}
   },
   "projects": {
-    "C:\\Users\\Guy Ronen\\Documents\\GAYA\\GayaAIEngineSolution\\AIEngineTests\\AIEngineTests.csproj": {
+    "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\AIEngineTests\\AIEngineTests.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\Guy Ronen\\Documents\\GAYA\\GayaAIEngineSolution\\AIEngineTests\\AIEngineTests.csproj",
+        "projectUniqueName": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\AIEngineTests\\AIEngineTests.csproj",
         "projectName": "AIEngineTests",
-        "projectPath": "C:\\Users\\Guy Ronen\\Documents\\GAYA\\GayaAIEngineSolution\\AIEngineTests\\AIEngineTests.csproj",
+        "projectPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\AIEngineTests\\AIEngineTests.csproj",
         "packagesPath": "C:\\Users\\Guy Ronen\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\Guy Ronen\\Documents\\GAYA\\GayaAIEngineSolution\\AIEngineTests\\obj\\",
+        "outputPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\AIEngineTests\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\Guy Ronen\\AppData\\Roaming\\NuGet\\NuGet.Config",
           "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
         ],
         "originalTargetFrameworks": [
-          "net7.0"
+          "net8.0"
         ],
         "sources": {
           "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
           "https://api.nuget.org/v3/index.json": {}
         },
         "frameworks": {
-          "net7.0": {
-            "targetAlias": "net7.0",
+          "net8.0": {
+            "targetAlias": "net8.0",
             "projectReferences": {
-              "C:\\Users\\Guy Ronen\\Documents\\GAYA\\GayaAIEngineSolution\\Shared\\Shared.csproj": {
-                "projectPath": "C:\\Users\\Guy Ronen\\Documents\\GAYA\\GayaAIEngineSolution\\Shared\\Shared.csproj"
+              "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Application\\Application.csproj": {
+                "projectPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Application\\Application.csproj"
+              },
+              "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Core\\Core.csproj": {
+                "projectPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Core\\Core.csproj"
+              },
+              "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Infrastructure\\Infrastructure.csproj": {
+                "projectPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Infrastructure\\Infrastructure.csproj"
               }
             }
           }
@@ -38,27 +44,39 @@
           "warnAsError": [
             "NU1605"
           ]
-        }
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.200"
       },
       "frameworks": {
-        "net7.0": {
-          "targetAlias": "net7.0",
+        "net8.0": {
+          "targetAlias": "net8.0",
           "dependencies": {
             "Microsoft.EntityFrameworkCore.InMemory": {
               "target": "Package",
-              "version": "[7.0.0, )"
+              "version": "[8.0.0, )"
+            },
+            "Microsoft.EntityFrameworkCore.Sqlite": {
+              "target": "Package",
+              "version": "[8.0.0, )"
             },
             "Microsoft.NET.Test.Sdk": {
               "target": "Package",
-              "version": "[17.4.1, )"
+              "version": "[17.6.0, )"
+            },
+            "Moq": {
+              "target": "Package",
+              "version": "[4.20.70, )"
             },
             "xunit": {
               "target": "Package",
               "version": "[2.4.2, )"
             },
             "xunit.runner.visualstudio": {
-              "include": "Runtime, Build, Native, ContentFiles, Analyzers, BuildTransitive",
-              "suppressParent": "All",
               "target": "Package",
               "version": "[2.4.5, )"
             }
@@ -77,15 +95,15 @@
           "downloadDependencies": [
             {
               "name": "Microsoft.AspNetCore.App.Ref",
-              "version": "[7.0.20, 7.0.20]"
+              "version": "[8.0.25, 8.0.25]"
             },
             {
               "name": "Microsoft.NETCore.App.Ref",
-              "version": "[7.0.20, 7.0.20]"
+              "version": "[8.0.25, 8.0.25]"
             },
             {
               "name": "Microsoft.WindowsDesktop.App.Ref",
-              "version": "[7.0.20, 7.0.20]"
+              "version": "[8.0.25, 8.0.25]"
             }
           ],
           "frameworkReferences": {
@@ -93,61 +111,67 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.110\\RuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.201/PortableRuntimeIdentifierGraph.json"
         }
       }
     },
-    "C:\\Users\\Guy Ronen\\Documents\\GAYA\\GayaAIEngineSolution\\Shared\\Shared.csproj": {
+    "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Application\\Application.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\Guy Ronen\\Documents\\GAYA\\GayaAIEngineSolution\\Shared\\Shared.csproj",
-        "projectName": "Shared",
-        "projectPath": "C:\\Users\\Guy Ronen\\Documents\\GAYA\\GayaAIEngineSolution\\Shared\\Shared.csproj",
+        "projectUniqueName": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Application\\Application.csproj",
+        "projectName": "Application",
+        "projectPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Application\\Application.csproj",
         "packagesPath": "C:\\Users\\Guy Ronen\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\Guy Ronen\\Documents\\GAYA\\GayaAIEngineSolution\\Shared\\obj\\",
+        "outputPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Application\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\Guy Ronen\\AppData\\Roaming\\NuGet\\NuGet.Config",
           "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
         ],
         "originalTargetFrameworks": [
-          "net7.0"
+          "net8.0"
         ],
         "sources": {
           "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
           "https://api.nuget.org/v3/index.json": {}
         },
         "frameworks": {
-          "net7.0": {
-            "targetAlias": "net7.0",
-            "projectReferences": {}
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {
+              "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Core\\Core.csproj": {
+                "projectPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Core\\Core.csproj"
+              }
+            }
           }
         },
         "warningProperties": {
           "warnAsError": [
             "NU1605"
           ]
-        }
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.200"
       },
       "frameworks": {
-        "net7.0": {
-          "targetAlias": "net7.0",
+        "net8.0": {
+          "targetAlias": "net8.0",
           "dependencies": {
-            "Microsoft.EntityFrameworkCore.InMemory": {
+            "Microsoft.Extensions.Configuration.Abstractions": {
               "target": "Package",
-              "version": "[7.0.0, )"
+              "version": "[8.0.0, )"
             },
-            "Microsoft.Extensions.Hosting": {
+            "Microsoft.Extensions.Configuration.Binder": {
               "target": "Package",
-              "version": "[7.0.0, )"
+              "version": "[8.0.0, )"
             },
-            "Microsoft.Extensions.Logging.Console": {
+            "Microsoft.Extensions.Logging.Abstractions": {
               "target": "Package",
-              "version": "[7.0.0, )"
-            },
-            "System.Management": {
-              "target": "Package",
-              "version": "[7.0.2, )"
+              "version": "[8.0.0, )"
             }
           },
           "imports": [
@@ -164,15 +188,15 @@
           "downloadDependencies": [
             {
               "name": "Microsoft.AspNetCore.App.Ref",
-              "version": "[7.0.20, 7.0.20]"
+              "version": "[8.0.25, 8.0.25]"
             },
             {
               "name": "Microsoft.NETCore.App.Ref",
-              "version": "[7.0.20, 7.0.20]"
+              "version": "[8.0.25, 8.0.25]"
             },
             {
               "name": "Microsoft.WindowsDesktop.App.Ref",
-              "version": "[7.0.20, 7.0.20]"
+              "version": "[8.0.25, 8.0.25]"
             }
           ],
           "frameworkReferences": {
@@ -180,7 +204,189 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.110\\RuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.201/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    },
+    "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Core\\Core.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Core\\Core.csproj",
+        "projectName": "Core",
+        "projectPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Core\\Core.csproj",
+        "packagesPath": "C:\\Users\\Guy Ronen\\.nuget\\packages\\",
+        "outputPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Core\\obj\\",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "C:\\Users\\Guy Ronen\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.200"
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "downloadDependencies": [
+            {
+              "name": "Microsoft.AspNetCore.App.Ref",
+              "version": "[8.0.25, 8.0.25]"
+            },
+            {
+              "name": "Microsoft.NETCore.App.Ref",
+              "version": "[8.0.25, 8.0.25]"
+            },
+            {
+              "name": "Microsoft.WindowsDesktop.App.Ref",
+              "version": "[8.0.25, 8.0.25]"
+            }
+          ],
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.201/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    },
+    "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Infrastructure\\Infrastructure.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Infrastructure\\Infrastructure.csproj",
+        "projectName": "Infrastructure",
+        "projectPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Infrastructure\\Infrastructure.csproj",
+        "packagesPath": "C:\\Users\\Guy Ronen\\.nuget\\packages\\",
+        "outputPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Infrastructure\\obj\\",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "C:\\Users\\Guy Ronen\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {
+              "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Core\\Core.csproj": {
+                "projectPath": "C:\\Projects\\MaiaAssistantAIEngine\\MaiaAIEngine.services\\Core\\Core.csproj"
+              }
+            }
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.200"
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "dependencies": {
+            "Microsoft.EntityFrameworkCore": {
+              "target": "Package",
+              "version": "[8.0.0, )"
+            },
+            "Microsoft.EntityFrameworkCore.Design": {
+              "include": "Runtime, Build, Native, ContentFiles, Analyzers",
+              "suppressParent": "All",
+              "target": "Package",
+              "version": "[8.0.0, )"
+            },
+            "Microsoft.EntityFrameworkCore.SqlServer": {
+              "target": "Package",
+              "version": "[8.0.0, )"
+            },
+            "Microsoft.Extensions.Hosting.Abstractions": {
+              "target": "Package",
+              "version": "[8.0.0, )"
+            },
+            "Microsoft.Extensions.Http": {
+              "target": "Package",
+              "version": "[8.0.0, )"
+            },
+            "Microsoft.Extensions.Logging.Abstractions": {
+              "target": "Package",
+              "version": "[8.0.0, )"
+            }
+          },
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "downloadDependencies": [
+            {
+              "name": "Microsoft.AspNetCore.App.Ref",
+              "version": "[8.0.25, 8.0.25]"
+            },
+            {
+              "name": "Microsoft.NETCore.App.Ref",
+              "version": "[8.0.25, 8.0.25]"
+            },
+            {
+              "name": "Microsoft.WindowsDesktop.App.Ref",
+              "version": "[8.0.25, 8.0.25]"
+            }
+          ],
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.201/PortableRuntimeIdentifierGraph.json"
         }
       }
     }

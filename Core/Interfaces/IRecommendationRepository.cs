@@ -8,7 +8,8 @@ public interface IRecommendationRepository
     Task<List<AiRecommendation>> GetPendingAsync(CancellationToken ct = default);
     Task SaveAsync(AiRecommendation recommendation, CancellationToken ct = default);
     Task MarkExecutedAsync(int recommendationId, CancellationToken ct = default);
-    Task<PagedResult<AiRecommendation>> GetPagedAsync(int page, int pageSize, CancellationToken ct = default);
+    Task<PagedResult<RecommendationListItem>> GetPagedAsync(int page, int pageSize, CancellationToken ct = default);
+    Task<bool> ExistsForFailureAsync(int failureId, CancellationToken ct = default);
 
     /// <summary>
     /// Sets the operator decision on a recommendation. <c>true</c> = approved (eligible for

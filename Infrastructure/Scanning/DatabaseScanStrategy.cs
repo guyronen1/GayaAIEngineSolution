@@ -77,14 +77,15 @@ public sealed class DatabaseScanStrategy(
 
             var rows = await QueryMatchingRowsAsync(connStr, rule.SourceTable!, rule, watermark, ct);
 
-            // Always advance the watermark so the next scan starts after the highest value seen.
-            // On first scan with no results we still set it to the current table max so we don't
-            // re-scan historical rows on the next run.
+            // Advance the watermark to the highest WatermarkColumn value seen this scan.
+            // When zero rows matched, take MAX over rows that satisfy the rule's filter —
+            // NOT MAX over the whole table, because a future-dated healthy row would jump
+            // the watermark past any current-dated unhealthy row inserted next.
             if (rule.WatermarkColumn is not null)
             {
                 var newWatermark = rows.Count > 0
                     ? rows.Max(r => r.WatermarkValue ?? string.Empty)
-                    : await QueryCurrentMaxAsync(connStr, rule.SourceTable!, rule.WatermarkColumn, ct);
+                    : await QueryFilteredMaxAsync(connStr, rule.SourceTable!, rule.WatermarkColumn, rule, ct);
 
                 if (newWatermark is not null)
                     await watermarks.UpdateDbWatermarkAsync(rule.CheckRuleId, newWatermark, ct);
@@ -115,7 +116,7 @@ public sealed class DatabaseScanStrategy(
                     ErrorMessage   = BuildRowMessage(rule, rowKey, value, wmValue, srcValue),
                     SourceLogPath  = $"db://{job.ConnectionName ?? "DefaultConnection"}/{rule.SourceTable}",
                     Status         = JobStatus.Failed,
-                    DetectedAt     = DateTime.UtcNow,
+                    DetectedAt     = DateTime.Now,
                 };
 
                 failure = await jobRepo.SaveAsync(failure, ct);
@@ -189,8 +190,10 @@ public sealed class DatabaseScanStrategy(
         // All column names and table come from admin config and are bracketed.
         // All filter values are always parameterised.
         var quotedTable = QuoteTable(sourceTable);
+        // Style 121 = ISO `yyyy-mm-dd hh:mi:ss.fffffff` (full datetime2 precision).
+        // For non-date columns the style is silently ignored and you get the default text form.
         var wmSelect  = rule.WatermarkColumn is not null
-            ? $", CAST([{rule.WatermarkColumn}] AS NVARCHAR(100)) AS _WatermarkVal"
+            ? $", CONVERT(NVARCHAR(50), [{rule.WatermarkColumn}], 121) AS _WatermarkVal"
             : string.Empty;
         var srcSelect = rule.SourceIdColumn is not null
             ? $", CAST([{rule.SourceIdColumn}] AS NVARCHAR(100)) AS _SourceIdVal"
@@ -238,13 +241,24 @@ public sealed class DatabaseScanStrategy(
         return rows;
     }
 
-    private static async Task<string?> QueryCurrentMaxAsync(
-        string connStr, string sourceTable, string watermarkColumn, CancellationToken ct)
+    /// <summary>
+    /// MAX(watermark) over rows that satisfy the rule's filter clause.
+    /// Used as the baseline when a scan returns zero matching rows, so the watermark only
+    /// ever advances within the population the rule would actually report on.
+    /// </summary>
+    private static async Task<string?> QueryFilteredMaxAsync(
+        string connStr, string sourceTable, string watermarkColumn, ScanCheckRule rule, CancellationToken ct)
     {
-        var sql = $"SELECT CAST(MAX([{watermarkColumn}]) AS NVARCHAR(100)) FROM {QuoteTable(sourceTable)}";
+        var (filterClause, filterParams) = BuildFilterClause(rule);
+        var sql = $"SELECT CONVERT(NVARCHAR(50), MAX([{watermarkColumn}]), 121) " +
+                  $"FROM {QuoteTable(sourceTable)} WHERE {filterClause}";
+
         await using var conn = new SqlConnection(connStr);
         await conn.OpenAsync(ct);
-        await using var cmd    = new SqlCommand(sql, conn);
+        await using var cmd = new SqlCommand(sql, conn);
+        foreach (var (name, value) in filterParams)
+            cmd.Parameters.AddWithValue(name, value);
+
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is DBNull || result is null ? null : result.ToString();
     }

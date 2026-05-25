@@ -1,0 +1,55 @@
+﻿using MaiaAI.Core.Entities;
+using MaiaAI.Core.Enums;
+using MaiaAI.Core.Interfaces;
+using MaiaAI.Core.Interfaces.UseCases;
+using MaiaAI.Core.Results;
+using Microsoft.Extensions.Logging;
+
+namespace MaiaAI.Application.Remediation;
+
+public sealed class GenerateSuggestionsUseCase(
+    IRecommendationRepository recommendations,
+    IFixCatalogue catalogue,
+    ILogger<GenerateSuggestionsUseCase> logger) : IGenerateSuggestionsUseCase
+{
+    private static readonly FixCatalogueEntry DefaultEntry =
+        new("Manual investigation required.", FixCategory.Manual, -0.2, false);
+
+    public async Task ExecuteAsync(
+        IEnumerable<ClassificationResult> results,
+        CancellationToken ct = default)
+    {
+        foreach (var result in results)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (await recommendations.ExistsForFailureAsync(result.FailureId, ct))
+            {
+                logger.LogDebug(
+                    "Recommendation already exists for Failure {FailureId} — skipping",
+                    result.FailureId);
+                continue;
+            }
+
+            var entry = await catalogue.GetEntryAsync(result.ErrorTypeCode, result.JobTypeId, ct) ?? DefaultEntry;
+
+            var recommendation = new AiRecommendation
+            {
+                FailureId       = result.FailureId,
+                ErrorTypeId     = result.ErrorTypeId,
+                SuggestedAction = entry.SuggestedAction,
+                FixCategory     = entry.Category,
+                ConfidenceScore = (decimal)Math.Clamp(result.Confidence + entry.ConfidenceBoost, 0, 1),
+                Explanation     = $"Detected: {result.RawError}",
+                AutoFixAvailable = entry.AutoHeal,
+                RecommendedAt   = DateTime.Now,
+            };
+
+            await recommendations.SaveAsync(recommendation, ct);
+
+            logger.LogInformation(
+                "Suggestion saved for Failure {FailureId}: [{Category}] {Action}",
+                result.FailureId, entry.Category, entry.SuggestedAction);
+        }
+    }
+}

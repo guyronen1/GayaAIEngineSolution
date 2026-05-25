@@ -22,6 +22,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
     public DbSet<ScanFileWatermark>   ScanFileWatermarks  => Set<ScanFileWatermark>();
     public DbSet<ScanDbWatermark>     ScanDbWatermarks    => Set<ScanDbWatermark>();
     public DbSet<MonitoredJobLease>   MonitoredJobLeases  => Set<MonitoredJobLease>();
+    public DbSet<ScanRunHistory>      ScanRunHistory      => Set<ScanRunHistory>();
 
     protected override void OnModelCreating(ModelBuilder mb)
     {
@@ -41,6 +42,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
         ConfigureMonitoredJob(mb);
         ConfigureMonitoredJobRule(mb);
         ConfigureMonitoredJobLease(mb);
+        ConfigureScanRunHistory(mb);
         SeedData(mb);
     }
 
@@ -82,7 +84,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(j => j.StepName).HasMaxLength(200);
             e.Property(j => j.SourceId).HasMaxLength(500);
             e.Property(j => j.ErrorMessage).HasColumnType("nvarchar(max)");
-            e.Property(j => j.DetectedAt).IsRequired().HasDefaultValueSql("GETUTCDATE()");
+            e.Property(j => j.DetectedAt).IsRequired().HasDefaultValueSql("GETDATE()");
             e.Property(j => j.SourceLogPath).IsRequired().HasMaxLength(200);
             e.Property(j => j.Status).IsRequired().HasMaxLength(50).HasConversion<string>();
 
@@ -138,7 +140,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(r => r.IsAutoHealEligible).HasDefaultValue(false);
             e.Property(r => r.Enabled).HasDefaultValue(true);
             e.Property(r => r.CreatedBy).HasMaxLength(100);
-            e.Property(r => r.ActionTimestamp).HasDefaultValueSql("GETUTCDATE()");
+            e.Property(r => r.ActionTimestamp).HasDefaultValueSql("GETDATE()");
             e.Property(r => r.ActionType).IsRequired().HasMaxLength(50).HasConversion<string>().HasDefaultValue(FixActionType.Manual);
             e.Property(r => r.ActionPayload).HasColumnType("nvarchar(max)");
 
@@ -164,7 +166,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(r => r.FixCategory).IsRequired().HasMaxLength(50).HasConversion<string>();
             e.Property(r => r.ConfidenceScore).IsRequired().HasPrecision(5, 2);
             e.Property(r => r.Explanation).HasColumnType("nvarchar(max)");
-            e.Property(r => r.RecommendedAt).IsRequired().HasDefaultValueSql("GETUTCDATE()");
+            e.Property(r => r.RecommendedAt).IsRequired().HasDefaultValueSql("GETDATE()");
             e.Property(r => r.AutoFixAvailable).HasDefaultValue(false);
             e.Property(r => r.IsExecuted).HasDefaultValue(false);
 
@@ -188,7 +190,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.HasKey(o => o.ActionId);
             e.Property(o => o.OperatorId).IsRequired().HasMaxLength(100);
             e.Property(o => o.ActionTaken).IsRequired().HasMaxLength(200);
-            e.Property(o => o.ActionTimestamp).IsRequired().HasDefaultValueSql("GETUTCDATE()");
+            e.Property(o => o.ActionTimestamp).IsRequired().HasDefaultValueSql("GETDATE()");
 
             e.HasOne(o => o.Recommendation)
                 .WithMany(r => r.OperatorActions)
@@ -206,7 +208,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(f => f.ExecutedAction).IsRequired().HasMaxLength(300);
             e.Property(f => f.TriggerType).IsRequired().HasMaxLength(50).HasConversion<string>();
             e.Property(f => f.ExecutedBy).IsRequired().HasMaxLength(100);
-            e.Property(f => f.ExecutedAt).IsRequired().HasDefaultValueSql("GETUTCDATE()");
+            e.Property(f => f.ExecutedAt).IsRequired().HasDefaultValueSql("GETDATE()");
             e.Property(f => f.ResultDetail).HasColumnType("nvarchar(max)");
 
             e.HasOne(f => f.Failure)
@@ -230,7 +232,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(a => a.EventType).IsRequired().HasMaxLength(100);
             e.Property(a => a.Actor).IsRequired().HasMaxLength(100);
             e.Property(a => a.Detail).HasColumnType("nvarchar(max)");
-            e.Property(a => a.Timestamp).IsRequired().HasDefaultValueSql("GETUTCDATE()");
+            e.Property(a => a.Timestamp).IsRequired().HasDefaultValueSql("GETDATE()");
 
             e.HasOne(a => a.Failure)
                 .WithMany(j => j.AuditLogs)
@@ -284,7 +286,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.HasKey(w => w.WatermarkId);
             e.HasIndex(w => w.CheckRuleId).IsUnique();
             e.Property(w => w.WatermarkValue).IsRequired().HasMaxLength(100);
-            e.Property(w => w.LastScannedAt).IsRequired().HasDefaultValueSql("GETUTCDATE()");
+            e.Property(w => w.LastScannedAt).IsRequired().HasDefaultValueSql("GETDATE()");
 
             e.HasOne(w => w.CheckRule)
                 .WithMany()
@@ -302,7 +304,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.HasIndex(w => new { w.MonitoredJobId, w.FilePath }).IsUnique();
             e.Property(w => w.FilePath).IsRequired().HasMaxLength(500);
             e.Property(w => w.ByteOffset).IsRequired();
-            e.Property(w => w.LastScannedAt).IsRequired().HasDefaultValueSql("GETUTCDATE()");
+            e.Property(w => w.LastScannedAt).IsRequired().HasDefaultValueSql("GETDATE()");
 
             e.HasOne(w => w.MonitoredJob)
                 .WithMany()
@@ -328,7 +330,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(m => m.PollingIntervalSeconds).HasDefaultValue(300);
             e.Property(m => m.IsActive).HasDefaultValue(true);
             e.Property(m => m.Description).HasColumnType("nvarchar(1000)");
-            e.Property(m => m.CreatedAt).IsRequired().HasDefaultValueSql("GETUTCDATE()");
+            e.Property(m => m.CreatedAt).IsRequired().HasDefaultValueSql("GETDATE()");
 
             e.HasOne(m => m.JobType)
                 .WithMany(jt => jt.MonitoredJobs)
@@ -386,6 +388,49 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
                 .WithMany(cr => cr.MonitoredJobRules)
                 .HasForeignKey(r => r.RuleId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+    }
+
+    private static void ConfigureScanRunHistory(ModelBuilder mb)
+    {
+        mb.Entity<ScanRunHistory>(e =>
+        {
+            e.ToTable("ScanRunHistory");
+            e.HasKey(r => r.ScanRunId);                                  // PK → clustered (default)
+            e.Property(r => r.LeasedBy).IsRequired().HasMaxLength(200);
+            e.Property(r => r.StartedAt).HasColumnType("datetime2(3)").IsRequired();
+            e.Property(r => r.CompletedAt).HasColumnType("datetime2(3)").IsRequired();
+            e.Property(r => r.Outcome).HasConversion<string>().HasMaxLength(50).IsRequired();
+            e.Property(r => r.Error).HasMaxLength(2000);
+
+            e.HasOne(r => r.MonitoredJob)
+                .WithMany()
+                .HasForeignKey(r => r.MonitoredJobId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Covers "last N runs of job X" — no bookmark lookups for the columns the
+            // /scan-runs endpoint surfaces.
+            e.HasIndex(r => new { r.MonitoredJobId, r.StartedAt })
+                .HasDatabaseName("IX_ScanRunHistory_Job_StartedAt")
+                .IsDescending(false, true)
+                .IncludeProperties(r => new
+                {
+                    r.CompletedAt,
+                    r.DurationMs,
+                    r.Outcome,
+                    r.FailuresDetected,
+                    r.Classifications,
+                    r.Recommendations,
+                });
+
+            // Filtered: "recent failures across all jobs" — tiny (most rows are Success).
+            // Outcome is stored as a string (HasConversion<string>), so the filter compares
+            // the persisted string form, not the enum's int value.
+            e.HasIndex(r => r.StartedAt)
+                .HasDatabaseName("IX_ScanRunHistory_Failures")
+                .IsDescending(true)
+                .IncludeProperties(r => new { r.MonitoredJobId, r.Outcome, r.Error })
+                .HasFilter("[Outcome] <> 'Success'");
         });
     }
 

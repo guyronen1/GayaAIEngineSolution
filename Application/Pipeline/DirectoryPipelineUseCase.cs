@@ -83,7 +83,7 @@ public sealed class DirectoryPipelineUseCase(
                     ErrorMessage   = string.Join(Environment.NewLine, errorLines),
                     SourceLogPath  = filePath,
                     Status         = JobStatus.Failed,
-                    DetectedAt     = DateTime.UtcNow,
+                    DetectedAt     = DateTime.Now,
                 };
 
                 failure = await jobs.SaveAsync(failure, ct);

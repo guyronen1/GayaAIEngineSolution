@@ -1,0 +1,20 @@
+using MaiaAI.Core.Entities;
+
+namespace MaiaAI.Core.Results;
+
+/// <summary>
+/// A recommendation enriched with a snapshot of its current matching FixPolicyRule
+/// (looked up at query time, NOT a stored FK).
+///
+/// <para><c>FixPolicyRuleId</c> / <c>PolicyIsAutoHealEligible</c> are both <c>null</c>
+/// when no enabled policy matches — whether because no row exists at all, or because
+/// the row exists with <c>Enabled = false</c>. Callers must treat both cases the same.</para>
+///
+/// <para>TODO (separate task): the policy lookup currently ignores JobTypeId
+/// (matches today's execution path in DefaultFixEngine/SqlFixPolicyRepository).
+/// When that bug is fixed, this projection must change in lockstep.</para>
+/// </summary>
+public sealed record RecommendationListItem(
+    AiRecommendation Recommendation,
+    int?             FixPolicyRuleId,
+    bool?            PolicyIsAutoHealEligible);

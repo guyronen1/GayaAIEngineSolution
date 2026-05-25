@@ -1,2 +1,0 @@
-# GayaAIEngineSolution
-AIEngineSolution

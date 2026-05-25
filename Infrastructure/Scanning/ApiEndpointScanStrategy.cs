@@ -68,7 +68,7 @@ public sealed class ApiEndpointScanStrategy(
             ErrorMessage   = $"API check failed: status={statusStr}, body={snippet}",
             SourceLogPath  = job.LogSourceUrl,
             Status         = JobStatus.Failed,
-            DetectedAt     = DateTime.UtcNow,
+            DetectedAt     = DateTime.Now,
         };
 
         failure = await jobRepo.SaveAsync(failure, ct);

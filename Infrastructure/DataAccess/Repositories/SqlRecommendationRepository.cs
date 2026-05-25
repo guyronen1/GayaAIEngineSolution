@@ -11,7 +11,10 @@ public sealed class SqlRecommendationRepository(IDbContextFactory<AiDbContext> f
     public async Task<List<AiRecommendation>> GetPendingAsync(CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
+        // Include Failure so DefaultFixEngine can read recommendation.Failure.JobTypeId
+        // for the (JobTypeId + ErrorTypeId) policy lookup without an extra round-trip.
         return await db.AIRecommendations
+            .Include(r => r.Failure)
             .Where(r => !r.IsExecuted && (r.OperatorApproved == true || r.AutoFixAvailable))
             .ToListAsync(ct);
     }
@@ -41,7 +44,13 @@ public sealed class SqlRecommendationRepository(IDbContextFactory<AiDbContext> f
         return rows > 0;
     }
 
-    public async Task<PagedResult<AiRecommendation>> GetPagedAsync(
+    public async Task<bool> ExistsForFailureAsync(int failureId, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        return await db.AIRecommendations.AnyAsync(r => r.FailureId == failureId, ct);
+    }
+
+    public async Task<PagedResult<RecommendationListItem>> GetPagedAsync(
         int page, int pageSize, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
@@ -51,7 +60,33 @@ public sealed class SqlRecommendationRepository(IDbContextFactory<AiDbContext> f
             .OrderByDescending(r => r.RecommendedAt);
 
         var total = await query.CountAsync(ct);
-        var items = await query.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
-        return new PagedResult<AiRecommendation>(items, total, page, pageSize);
+
+        // Correlated subquery: pick the newest enabled FixPolicyRule for this rec's
+        // (JobTypeId + ErrorTypeId) pair. Mirrors DefaultFixEngine / SqlFixPolicyRepository
+        // semantics exactly — same filter, same tiebreaker — so the UI shows the policy
+        // that will actually be used at execution time.
+        var raw = await query
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(r => new
+            {
+                Rec    = r,
+                Policy = db.FixPolicyRules
+                    .Where(p => p.Enabled
+                             && p.ErrorTypeId == r.ErrorTypeId
+                             && p.JobTypeId   == r.Failure!.JobTypeId)
+                    .OrderByDescending(p => p.ActionTimestamp)
+                    .FirstOrDefault()
+            })
+            .ToListAsync(ct);
+
+        var items = raw
+            .Select(x => new RecommendationListItem(
+                x.Rec,
+                x.Policy?.RuleId,
+                x.Policy?.IsAutoHealEligible))
+            .ToList();
+
+        return new PagedResult<RecommendationListItem>(items, total, page, pageSize);
     }
 }

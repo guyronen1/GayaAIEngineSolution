@@ -1,3 +1,4 @@
+using MaiaAI.Core.Entities;
 using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Interfaces.UseCases;
@@ -108,13 +109,16 @@ public sealed class MonitoringWorker(
 
         // Fresh DI scope per job so each scan has its own DbContext, repos, strategies.
         using var scope = scopeFactory.CreateScope();
-        var jobRepo   = scope.ServiceProvider.GetRequiredService<IMonitoredJobRepository>();
-        var leaseRepo = scope.ServiceProvider.GetRequiredService<IMonitoredJobLeaseRepository>();
-        var strategies = scope.ServiceProvider.GetServices<IScanStrategy>();
+        var jobRepo     = scope.ServiceProvider.GetRequiredService<IMonitoredJobRepository>();
+        var leaseRepo   = scope.ServiceProvider.GetRequiredService<IMonitoredJobLeaseRepository>();
+        var historyRepo = scope.ServiceProvider.GetRequiredService<IScanRunHistoryRepository>();
+        var strategies  = scope.ServiceProvider.GetServices<IScanStrategy>();
 
         var outcome = JobRunOutcome.Success;
         string? error = null;
         var pollingIntervalSeconds = 300;
+        var startedAt = DateTime.Now;
+        var failures = 0; var classifications = 0; var recommendations = 0;
 
         try
         {
@@ -143,12 +147,14 @@ public sealed class MonitoringWorker(
                 job.ScanType, job.Name, lease.LeaseDurationSeconds);
 
             var result = await strategy.ScanAsync(job, jobCts.Token);
+            failures        = result.FailuresDetected;
+            classifications = result.Classifications;
+            recommendations = result.Recommendations;
 
             logger.LogInformation(
                 "MonitoredJob '{Name}' [{ScanType}]: {Failures} failures, " +
                 "{Classifications} classified, {Recommendations} recommendations — {Detail}",
-                job.Name, job.ScanType, result.FailuresDetected,
-                result.Classifications, result.Recommendations, result.Detail);
+                job.Name, job.ScanType, failures, classifications, recommendations, result.Detail);
         }
         catch (OperationCanceledException) when (!hostCt.IsCancellationRequested)
         {
@@ -164,6 +170,8 @@ public sealed class MonitoringWorker(
         }
         finally
         {
+            var completedAt = DateTime.Now;
+
             // Release uses the host token, not jobCts — we want to record outcome
             // even when the run timed out.
             try
@@ -173,13 +181,41 @@ public sealed class MonitoringWorker(
                     pollingIntervalSeconds, error, hostCt);
 
                 if (!stillOurs)
+                {
+                    outcome = JobRunOutcome.Stolen;
                     logger.LogWarning(
                         "Lease for job {JobId} was stolen before release — results recorded but lease state untouched",
                         lease.MonitoredJobId);
+                }
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to release lease for job {JobId}", lease.MonitoredJobId);
+            }
+
+            // Append history row regardless of stolen/timeout/failed — append-only audit
+            // of every scan attempt. Wrapped in its own try so a history-write failure
+            // never bubbles into the worker loop.
+            try
+            {
+                var durationMs = (int)Math.Clamp((completedAt - startedAt).TotalMilliseconds, 0, int.MaxValue);
+                await historyRepo.SaveAsync(new ScanRunHistory
+                {
+                    MonitoredJobId   = lease.MonitoredJobId,
+                    LeasedBy         = _leasedBy,
+                    StartedAt        = startedAt,
+                    CompletedAt      = completedAt,
+                    DurationMs       = durationMs,
+                    Outcome          = outcome,
+                    Error            = error is null ? null : (error.Length > 2000 ? error[..2000] : error),
+                    FailuresDetected = failures,
+                    Classifications  = classifications,
+                    Recommendations  = recommendations,
+                }, hostCt);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to write ScanRunHistory for job {JobId}", lease.MonitoredJobId);
             }
         }
     }

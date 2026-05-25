@@ -1,4 +1,4 @@
-using MaiaAI.Core.Enums;
+﻿using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
@@ -12,7 +12,7 @@ public sealed class SqlMonitoredJobLeaseRepository(IDbContextFactory<AiDbContext
     // workers walk past each other's locked rows rather than blocking. UPDLOCK + ROWLOCK
     // hold the row until commit so post-update state is visible to the other tx (or skipped).
     private const string ClaimSql = """
-        DECLARE @now datetime2(3) = SYSUTCDATETIME();
+        DECLARE @now datetime2(3) = SYSDATETIME();
 
         UPDATE TOP (@batchSize) L
         SET
@@ -78,10 +78,10 @@ public sealed class SqlMonitoredJobLeaseRepository(IDbContextFactory<AiDbContext
             .ExecuteUpdateAsync(s => s
                 .SetProperty(l => l.LeasedBy,           (string?)null)
                 .SetProperty(l => l.LeasedUntil,        (DateTime?)null)
-                .SetProperty(l => l.LastRunCompletedAt, DateTime.UtcNow)
+                .SetProperty(l => l.LastRunCompletedAt, DateTime.Now)
                 .SetProperty(l => l.LastRunOutcome,     (JobRunOutcome?)outcome)
                 .SetProperty(l => l.LastRunError,       truncatedError)
-                .SetProperty(l => l.NextEligibleAt,     DateTime.UtcNow.AddSeconds(nextPollingIntervalSeconds)),
+                .SetProperty(l => l.NextEligibleAt,     DateTime.Now.AddSeconds(nextPollingIntervalSeconds)),
             ct);
 
         return rows > 0;
@@ -96,9 +96,9 @@ public sealed class SqlMonitoredJobLeaseRepository(IDbContextFactory<AiDbContext
             .Where(l => l.MonitoredJobId == monitoredJobId
                      && l.LeasedBy == leasedBy
                      && l.LeasedUntil != null
-                     && l.LeasedUntil > DateTime.UtcNow)
+                     && l.LeasedUntil > DateTime.Now)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(l => l.LeasedUntil, DateTime.UtcNow.AddSeconds(extendSeconds)),
+                .SetProperty(l => l.LeasedUntil, DateTime.Now.AddSeconds(extendSeconds)),
             ct);
 
         return rows > 0;

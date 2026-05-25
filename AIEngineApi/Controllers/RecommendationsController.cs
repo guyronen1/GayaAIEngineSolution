@@ -1,4 +1,4 @@
-using AIEngineAPI.Contracts;
+﻿using AIEngineAPI.Contracts;
 using MaiaAI.Core.Entities;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Interfaces.UseCases;
@@ -60,7 +60,7 @@ public class RecommendationsController(
             RecommendationId = id,
             OperatorId       = req.OperatorId,
             ActionTaken      = actionTaken,
-            ActionTimestamp  = DateTime.UtcNow,
+            ActionTimestamp  = DateTime.Now,
         }, ct);
 
         await audit.WriteAsync(new AuditLog
@@ -70,6 +70,7 @@ public class RecommendationsController(
             Actor     = req.OperatorId,
             Detail    = $"Operator {req.OperatorId} {actionTaken.ToLowerInvariant()}d recommendation {id} " +
                         $"(action: {rec.SuggestedAction}).",
+            Timestamp = DateTime.Now,
         }, ct);
 
         if (approved)

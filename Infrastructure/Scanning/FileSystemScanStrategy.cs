@@ -9,8 +9,8 @@ namespace MaiaAI.Infrastructure.Scanning;
 
 public sealed class FileSystemScanStrategy(
     IDirectoryPipelineUseCase       pipeline,
-    ILogReader                      logReader,
     IJobRepository                  jobRepo,
+    IScanWatermarkRepository        watermarks,
     IClassifyJobsUseCase            classify,
     IGenerateSuggestionsUseCase     suggest,
     ILogger<FileSystemScanStrategy> logger) : IScanStrategy
@@ -64,8 +64,13 @@ public sealed class FileSystemScanStrategy(
 
             foreach (var file in files)
             {
-                var content = await logReader.ReadAsync(file, ct);
-                if (string.IsNullOrWhiteSpace(content)) continue;
+                var (content, newOffset) = await ReadNewContentAsync(job.MonitoredJobId, file, ct);
+                if (string.IsNullOrWhiteSpace(content))
+                {
+                    if (newOffset > 0)
+                        await watermarks.UpdateFileOffsetAsync(job.MonitoredJobId, file, newOffset, ct);
+                    continue;
+                }
 
                 var lines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
@@ -102,7 +107,7 @@ public sealed class FileSystemScanStrategy(
                         ErrorMessage   = $"[{keyword}] {Path.GetFileName(file)}: {excerpt}",
                         SourceLogPath  = file,
                         Status         = JobStatus.Failed,
-                        DetectedAt     = DateTime.UtcNow,
+                        DetectedAt     = DateTime.Now,
                     };
 
                     failure = await jobRepo.SaveAsync(failure, ct);
@@ -112,6 +117,8 @@ public sealed class FileSystemScanStrategy(
                         "FileSystemScan '{Job}': keyword '{Keyword}' matched in {File}",
                         job.Name, keyword, Path.GetFileName(file));
                 }
+
+                await watermarks.UpdateFileOffsetAsync(job.MonitoredJobId, file, newOffset, ct);
             }
         }
 
@@ -125,5 +132,24 @@ public sealed class FileSystemScanStrategy(
         result.Recommendations = classifications.Count;
 
         return result;
+    }
+
+    private async Task<(string Content, long NewOffset)> ReadNewContentAsync(
+        int monitoredJobId, string filePath, CancellationToken ct)
+    {
+        var fromOffset = await watermarks.GetFileOffsetAsync(monitoredJobId, filePath, ct);
+
+        await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+
+        if (fromOffset > stream.Length)
+            fromOffset = 0; // file was rotated or truncated
+
+        if (fromOffset == stream.Length)
+            return (string.Empty, fromOffset); // nothing new
+
+        stream.Seek(fromOffset, SeekOrigin.Begin);
+        using var reader = new StreamReader(stream, leaveOpen: true);
+        var content      = await reader.ReadToEndAsync(ct);
+        return (content, stream.Position);
     }
 }
