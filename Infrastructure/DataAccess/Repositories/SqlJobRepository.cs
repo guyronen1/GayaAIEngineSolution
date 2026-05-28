@@ -50,8 +50,10 @@ public sealed class SqlJobRepository(IDbContextFactory<AiDbContext> factory) : I
         var job = await db.JobFailures.FindAsync([failureId], ct);
         if (job is null) return;
         job.ErrorTypeId = result.ErrorTypeId;
-        if (!string.IsNullOrWhiteSpace(result.RawError))
-            job.ErrorMessage = result.RawError;
+        // Do NOT overwrite job.ErrorMessage — the scan strategy is authoritative for
+        // what error was detected (e.g. for FS scans, the specific log line in the new
+        // chunk past the watermark). The classifier's RawError already flows to the
+        // recommendation's Explanation field via GenerateSuggestionsUseCase.
         await db.SaveChangesAsync(ct);
     }
 
@@ -74,17 +76,32 @@ public sealed class SqlJobRepository(IDbContextFactory<AiDbContext> factory) : I
     }
 
     public async Task<PagedResult<JobFailure>> GetPagedAsync(
-        int page, int pageSize, CancellationToken ct = default)
+        int page, int pageSize, string? view = null, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        var query = db.JobFailures
+        IQueryable<JobFailure> query = db.JobFailures
             .Include(j => j.JobType)
             .Include(j => j.ErrorType)
-            .Include(j => j.MonitoredJob)
-            .OrderByDescending(j => j.DetectedAt);
+            .Include(j => j.MonitoredJob);
 
-        var total = await query.CountAsync(ct);
-        var items = await query.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+        query = (view ?? string.Empty).ToLowerInvariant() switch
+        {
+            "active"          => query.Where(j => j.Status == JobStatus.Failed),
+            "unclassified"    => query.Where(j => j.Status == JobStatus.Failed && j.ErrorTypeId == null),
+            "awaiting-action" => query.Where(j => j.Status == JobStatus.Failed && j.ErrorTypeId != null),
+            "resolved"        => query.Where(j => j.Status == JobStatus.Resolved),
+            "manual-required" => query.Where(j => j.Status == JobStatus.ManualRequired),
+            "auto-fixed"      => query.Where(j => db.FixExecutionLogs.Any(x =>
+                                    x.FailureId == j.FailureId && x.Success && x.TriggerType == TriggerType.AutoHeal)),
+            "operator-fixed"  => query.Where(j => db.FixExecutionLogs.Any(x =>
+                                    x.FailureId == j.FailureId && x.Success && x.TriggerType == TriggerType.OperatorApproved)),
+            _ => query, // null / "" / "all" / unknown → no filter
+        };
+
+        var ordered = query.OrderByDescending(j => j.DetectedAt);
+
+        var total = await ordered.CountAsync(ct);
+        var items = await ordered.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
         return new PagedResult<JobFailure>(items, total, page, pageSize);
     }
 }

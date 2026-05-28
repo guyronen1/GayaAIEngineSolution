@@ -13,22 +13,22 @@ public class ClassifyJobsUseCaseTests
 {
     private readonly Mock<IJobRepository>          _jobsMock       = new();
     private readonly Mock<IClassificationStrategy> _strategyMock   = new();
-    private readonly Mock<ILogReader>              _readerMock     = new();
 
     private ClassifyJobsUseCase CreateSut() =>
-        new(_jobsMock.Object, _strategyMock.Object, _readerMock.Object,
+        new(_jobsMock.Object, _strategyMock.Object,
             NullLogger<ClassifyJobsUseCase>.Instance);
 
     private JobFailure MakeJob(int id, string logContent)
     {
         var file = Path.GetTempFileName();
         File.WriteAllText(file, logContent);
-        _readerMock.Setup(r => r.ReadAsync(file, It.IsAny<CancellationToken>()))
-                   .ReturnsAsync(logContent);
+        // Strategy classifies against job.ErrorMessage (the captured line), not the file —
+        // tests pass logContent in both so the original behavior assertions still hold.
         return new JobFailure
         {
             FailureId = id, JobId = id, JobTypeId = 1,
-            Status = JobStatus.Failed, SourceLogPath = file
+            Status = JobStatus.Failed, SourceLogPath = file,
+            ErrorMessage = logContent,
         };
     }
 
@@ -159,8 +159,7 @@ public class ClassifyJobsUseCaseTests
         };
         _jobsMock.Setup(r => r.GetUnclassifiedAsync(It.IsAny<CancellationToken>()))
                  .ReturnsAsync([job]);
-        _readerMock.Setup(r => r.ReadAsync("/nonexistent/job.log", It.IsAny<CancellationToken>()))
-                   .ReturnsAsync(string.Empty);
+        // No need to mock the log reader anymore — classifier reads job.ErrorMessage directly.
         SetupStrategy(null);
 
         var results = (await CreateSut().ExecuteAsync()).ToList();

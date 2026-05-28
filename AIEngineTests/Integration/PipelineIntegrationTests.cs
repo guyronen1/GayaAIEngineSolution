@@ -50,13 +50,16 @@ public class PipelineIntegrationTests : IAsyncLifetime
     public async Task FullPipeline_FailedJob_ProducesRecommendation()
     {
         // Pattern matches seeded DTSX rule: DTS_E_CANNOTACQUIRECONNECTION → DbConnection → Retry
+        const string errorLine = "DTS_E_CANNOTACQUIRECONNECTION: Cannot acquire connection";
         await File.WriteAllTextAsync(_tempLogFile,
-            "Starting DTSX job\nDTS_E_CANNOTACQUIRECONNECTION: Cannot acquire connection\nJob aborted");
+            $"Starting DTSX job\n{errorLine}\nJob aborted");
 
         _db.JobFailures.Add(new JobFailure
         {
             JobId = 1, JobTypeId = 1,
             Status = JobStatus.Failed, SourceLogPath = _tempLogFile,
+            // ErrorMessage is what the classifier sees — populated by scan strategies in prod.
+            ErrorMessage = errorLine,
         });
         await _db.SaveChangesAsync();
 
@@ -110,7 +113,7 @@ public class PipelineIntegrationTests : IAsyncLifetime
         var catalogue  = new FixCatalogue();
 
         var classifier = new ClassifyJobsUseCase(
-            jobRepo, strategy, logReader,
+            jobRepo, strategy,
             NullLogger<ClassifyJobsUseCase>.Instance);
 
         var suggestionSvc = new GenerateSuggestionsUseCase(

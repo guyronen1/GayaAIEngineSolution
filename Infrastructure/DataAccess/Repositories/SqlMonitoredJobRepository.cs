@@ -24,6 +24,7 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
         return await db.MonitoredJobs
             .Include(m => m.JobType)
             .Include(m => m.ScanTypeDefinition)
+            .Include(m => m.Lease)
             .Include(m => m.ScanCheckRules.Where(r => r.IsActive))
             .Include(m => m.JobRules.Where(jr => jr.IsActive))
                 .ThenInclude(jr => jr.Rule)
@@ -88,6 +89,7 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
         return await db.MonitoredJobs
             .Include(m => m.JobType)
             .Include(m => m.ScanTypeDefinition)
+            .Include(m => m.Lease)
             .Include(m => m.ScanCheckRules)
             .Include(m => m.JobRules.Where(jr => jr.IsActive))
                 .ThenInclude(jr => jr.Rule).ThenInclude(r => r!.ErrorType)

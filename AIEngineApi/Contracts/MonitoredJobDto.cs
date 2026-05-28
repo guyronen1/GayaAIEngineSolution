@@ -22,7 +22,8 @@ public sealed record MonitoredJobDto(
     string?                          Description,
     DateTime                         CreatedAt,
     IReadOnlyList<ScanCheckRuleDto>  ScanCheckRules,
-    IReadOnlyList<RuleOverrideDto>   Rules)
+    IReadOnlyList<RuleOverrideDto>   Rules,
+    MonitoredJobLeaseDto?            Lease)
 {
     public static MonitoredJobDto From(MonitoredJob m) => new(
         m.MonitoredJobId,
@@ -46,7 +47,41 @@ public sealed record MonitoredJobDto(
         m.JobRules
             .Where(jr => jr.IsActive && jr.Rule is not null)
             .Select(jr => RuleOverrideDto.From(jr.Rule!))
-            .ToList());
+            .ToList(),
+        // Null-safe: schema is 1:1 with cascade delete so Lease should always be
+        // present, but treat absence as gray-state in the UI rather than NPE.
+        MonitoredJobLeaseDto.From(m.Lease));
+}
+
+public sealed record MonitoredJobLeaseDto(
+    string?   LeasedBy,
+    DateTime? LeasedAt,
+    DateTime? LeasedUntil,
+    DateTime? NextEligibleAt,
+    DateTime? LastRunStartedAt,
+    DateTime? LastRunCompletedAt,
+    string?   LastRunOutcome,
+    string?   LastRunError,
+    int?      LastRunDurationMs)
+{
+    public static MonitoredJobLeaseDto? From(MonitoredJobLease? l)
+    {
+        if (l is null) return null;
+        int? durationMs = (l.LastRunStartedAt.HasValue && l.LastRunCompletedAt.HasValue)
+            ? (int)Math.Clamp((l.LastRunCompletedAt.Value - l.LastRunStartedAt.Value).TotalMilliseconds,
+                              0, int.MaxValue)
+            : null;
+        return new MonitoredJobLeaseDto(
+            l.LeasedBy,
+            l.LeasedAt,
+            l.LeasedUntil,
+            l.NextEligibleAt,
+            l.LastRunStartedAt,
+            l.LastRunCompletedAt,
+            l.LastRunOutcome?.ToString(),
+            l.LastRunError,
+            durationMs);
+    }
 }
 
 public sealed record ScanCheckRuleDto(

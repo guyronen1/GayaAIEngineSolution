@@ -10,7 +10,6 @@ namespace MaiaAI.Application.Classification;
 public sealed class ClassifyJobsUseCase(
     IJobRepository jobs,
     IClassificationStrategy classifier,
-    ILogReader logReader,
     ILogger<ClassifyJobsUseCase> logger) : IClassifyJobsUseCase
 {
     /// <summary>Classifies all failed jobs that have not yet been classified (ErrorTypeId is null).</summary>
@@ -35,10 +34,11 @@ public sealed class ClassifyJobsUseCase(
         {
             ct.ThrowIfCancellationRequested();
 
-            // For file-based failures use the log file; for DB/API failures fall back to ErrorMessage.
-            var logContent = await logReader.ReadAsync(job.SourceLogPath, ct);
-            if (string.IsNullOrWhiteSpace(logContent))
-                logContent = job.ErrorMessage ?? string.Empty;
+            // Classify against the failure's captured ErrorMessage — the strategy already
+            // selected the relevant line/row. Re-reading the whole log file here would
+            // make the classifier pick the FIRST matching pattern across the entire file,
+            // not the line that actually triggered THIS failure.
+            var logContent = job.ErrorMessage ?? string.Empty;
 
             var result = await classifier.ClassifyAsync(job, logContent, ct);
 

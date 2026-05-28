@@ -12,7 +12,12 @@ public interface IJobRepository
     Task<JobFailure> SaveAsync(JobFailure job, CancellationToken ct = default);
     Task UpdateStatusAsync(int failureId, JobStatus status, CancellationToken ct = default);
     Task UpdateClassificationAsync(int failureId, ClassificationResult result, CancellationToken ct = default);
-    Task<PagedResult<JobFailure>> GetPagedAsync(int page, int pageSize, CancellationToken ct = default);
+    /// <summary>
+    /// Paged listing of failures. <paramref name="view"/> filters server-side:
+    /// <c>active</c>, <c>unclassified</c>, <c>awaiting-action</c>, <c>auto-fixed</c>,
+    /// <c>operator-fixed</c>. Null/empty/unknown → unfiltered.
+    /// </summary>
+    Task<PagedResult<JobFailure>> GetPagedAsync(int page, int pageSize, string? view = null, CancellationToken ct = default);
 
     /// <summary>
     /// Returns true when a non-resolved failure already exists for this job/table/column combo,

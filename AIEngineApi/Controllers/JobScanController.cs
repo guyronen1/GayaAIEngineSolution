@@ -1,6 +1,8 @@
 ﻿using MaiaAI.Core.Entities;
+using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Interfaces.UseCases;
+using MaiaAI.Core.Results;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AIEngineAPI.Controllers;
@@ -9,6 +11,10 @@ namespace AIEngineAPI.Controllers;
 /// On-demand scan trigger for MonitoredJobs.
 /// Delegates to the IScanStrategy registered for each job's ScanType —
 /// no scan-type-specific logic lives here.
+///
+/// Manual scans go through <see cref="ExecuteAndRecordAsync"/> which writes a
+/// <c>ScanRunHistory</c> row exactly like the background <c>MonitoringWorker</c>
+/// does, so the dashboard's recent-activity strip surfaces both paths the same way.
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -17,8 +23,13 @@ public class JobScanController(
     IEnumerable<IScanStrategy>   strategies,
     IClassifyJobsUseCase         classify,
     IGenerateSuggestionsUseCase  suggest,
-    IExecuteFixesUseCase         execute) : ControllerBase
+    IExecuteFixesUseCase         execute,
+    IScanRunHistoryRepository    historyRepo) : ControllerBase
 {
+    // Per-process identity for manual triggers — mirrors the worker's LeasedBy format
+    // so audit queries can grep "host=...;runId=..." consistently across both paths.
+    private static readonly string ManualLeasedByPrefix =
+        $"manual;host={Environment.MachineName};pid={Environment.ProcessId}";
     /// <summary>Run the scan pipeline for a MonitoredJob by its ID.</summary>
     [HttpGet("{monitoredJobId:int}")]
     [HttpPost("{monitoredJobId:int}")]
@@ -62,7 +73,7 @@ public class JobScanController(
 
             try
             {
-                var r = await strategy.ScanAsync(job, ct);
+                var r = await ExecuteAndRecordAsync(job, strategy, ct);
                 results.Add(new
                 {
                     job.MonitoredJobId, job.Name, job.ScanType, Skipped = false,
@@ -107,7 +118,64 @@ public class JobScanController(
         if (strategy is null)
             return BadRequest(new { Message = $"No scan strategy registered for ScanType '{job.ScanType}'." });
 
-        var result = await strategy.ScanAsync(job, ct);
+        var result = await ExecuteAndRecordAsync(job, strategy, ct);
         return Ok(result);
+    }
+
+    /// <summary>
+    /// Runs the scan and appends a ScanRunHistory row regardless of outcome. Mirrors
+    /// the finally-block in <c>MonitoringWorker.RunOneJobAsync</c> so manual triggers
+    /// surface in the dashboard's recent-activity feed the same way scheduled scans do.
+    /// History-write failures are swallowed — they must not poison the operator's
+    /// scan response.
+    /// </summary>
+    private async Task<ScanResult> ExecuteAndRecordAsync(
+        MonitoredJob job, IScanStrategy strategy, CancellationToken ct)
+    {
+        var leasedBy  = $"{ManualLeasedByPrefix};runId={Guid.NewGuid():N}";
+        var startedAt = DateTime.Now;
+        var outcome   = JobRunOutcome.Success;
+        string? error = null;
+
+        ScanResult? result = null;
+        try
+        {
+            result = await strategy.ScanAsync(job, ct);
+            return result;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            outcome = JobRunOutcome.Timeout;
+            error   = "Scan cancelled by client";
+            throw;
+        }
+        catch (Exception ex)
+        {
+            outcome = JobRunOutcome.Failed;
+            error   = ex.Message;
+            throw;
+        }
+        finally
+        {
+            var completedAt = DateTime.Now;
+            try
+            {
+                var durationMs = (int)Math.Clamp((completedAt - startedAt).TotalMilliseconds, 0, int.MaxValue);
+                await historyRepo.SaveAsync(new ScanRunHistory
+                {
+                    MonitoredJobId   = job.MonitoredJobId,
+                    LeasedBy         = leasedBy,
+                    StartedAt        = startedAt,
+                    CompletedAt      = completedAt,
+                    DurationMs       = durationMs,
+                    Outcome          = outcome,
+                    Error            = error is null ? null : (error.Length > 2000 ? error[..2000] : error),
+                    FailuresDetected = result?.FailuresDetected ?? 0,
+                    Classifications  = result?.Classifications  ?? 0,
+                    Recommendations  = result?.Recommendations  ?? 0,
+                }, ct);
+            }
+            catch { /* don't let history-write failures affect the scan response */ }
+        }
     }
 }

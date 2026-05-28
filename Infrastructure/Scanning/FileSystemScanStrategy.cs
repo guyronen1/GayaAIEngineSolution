@@ -15,6 +15,10 @@ public sealed class FileSystemScanStrategy(
     IGenerateSuggestionsUseCase     suggest,
     ILogger<FileSystemScanStrategy> logger) : IScanStrategy
 {
+    /// <summary>Hard cap on failures created per file per keyword per scan.
+    /// Protects against a pathologically error-filled log chunk spawning thousands of rows.</summary>
+    private const int MaxFailuresPerKeywordPerScan = 100;
+
     public ScanType ScanType => ScanType.FileSystem;
 
     public async Task<ScanResult> ScanAsync(MonitoredJob job, CancellationToken ct = default)
@@ -28,6 +32,10 @@ public sealed class FileSystemScanStrategy(
         var keywordRules = job.ScanCheckRules
             .Where(r => r.IsActive && r.CheckType == CheckType.ErrorKeyword)
             .ToList();
+
+        logger.LogInformation(
+            "FileSystemScan '{Job}': total ScanCheckRules={Total}, active ErrorKeyword rules={Keywords}",
+            job.Name, job.ScanCheckRules.Count, keywordRules.Count);
 
         var result = new ScanResult
         {
@@ -80,42 +88,55 @@ public sealed class FileSystemScanStrategy(
                     var keyword = rule.TargetField.Trim('*').Trim();
                     if (string.IsNullOrEmpty(keyword)) continue;
 
-                    var matchLine = lines.FirstOrDefault(l =>
-                        l.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+                    // Every matching line in the new content becomes a failure.
+                    // No HasOpenFailureAsync check — the watermark already prevents replays
+                    // of old content, so leftover Failed-status rows from prior scans must
+                    // not block new errors from being reported.
+                    // Within this scan, dedup by exact line text so identical lines spammed
+                    // in the same chunk don't create N identical failures.
+                    var seenInBatch = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var matchesForKeyword = 0;
 
-                    if (matchLine is null) continue;
-
-                    // Dedup: skip if an open failure already exists for this file + keyword
-                    if (await jobRepo.HasOpenFailureAsync(job.MonitoredJobId, file, keyword, ct))
+                    foreach (var rawLine in lines)
                     {
-                        logger.LogDebug(
-                            "FileSystemScan '{Job}': open failure already exists for {File} + '{Keyword}' — skipping",
-                            job.Name, Path.GetFileName(file), keyword);
-                        continue;
+                        if (matchesForKeyword >= MaxFailuresPerKeywordPerScan)
+                        {
+                            logger.LogWarning(
+                                "FileSystemScan '{Job}': hit cap of {Cap} failures for keyword '{Keyword}' in {File} — remaining matches in this chunk skipped",
+                                job.Name, MaxFailuresPerKeywordPerScan, keyword, Path.GetFileName(file));
+                            break;
+                        }
+
+                        if (!rawLine.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        var excerpt = rawLine.Trim();
+                        if (excerpt.Length == 0) continue;
+                        if (!seenInBatch.Add(excerpt))
+                            continue; // identical line text already produced a failure this scan
+                        if (excerpt.Length > 500) excerpt = excerpt[..500];
+
+                        var failure = new JobFailure
+                        {
+                            JobId          = 0,
+                            JobTypeId      = job.JobTypeId,
+                            MonitoredJobId = job.MonitoredJobId,
+                            StepName       = Path.GetFileName(file),
+                            SourceId       = Path.GetFileName(file),
+                            ErrorMessage   = $"[{keyword}] {Path.GetFileName(file)}: {excerpt}",
+                            SourceLogPath  = file,
+                            Status         = JobStatus.Failed,
+                            DetectedAt     = DateTime.Now,
+                        };
+
+                        failure = await jobRepo.SaveAsync(failure, ct);
+                        created.Add(failure);
+                        matchesForKeyword++;
+
+                        logger.LogInformation(
+                            "FileSystemScan '{Job}': keyword '{Keyword}' matched in {File} — FailureId {FailureId}",
+                            job.Name, keyword, Path.GetFileName(file), failure.FailureId);
                     }
-
-                    var excerpt = matchLine.Trim();
-                    if (excerpt.Length > 500) excerpt = excerpt[..500];
-
-                    var failure = new JobFailure
-                    {
-                        JobId          = 0,
-                        JobTypeId      = job.JobTypeId,
-                        MonitoredJobId = job.MonitoredJobId,
-                        StepName       = Path.GetFileName(file),
-                        SourceId       = Path.GetFileName(file),
-                        ErrorMessage   = $"[{keyword}] {Path.GetFileName(file)}: {excerpt}",
-                        SourceLogPath  = file,
-                        Status         = JobStatus.Failed,
-                        DetectedAt     = DateTime.Now,
-                    };
-
-                    failure = await jobRepo.SaveAsync(failure, ct);
-                    created.Add(failure);
-
-                    logger.LogInformation(
-                        "FileSystemScan '{Job}': keyword '{Keyword}' matched in {File}",
-                        job.Name, keyword, Path.GetFileName(file));
                 }
 
                 await watermarks.UpdateFileOffsetAsync(job.MonitoredJobId, file, newOffset, ct);
