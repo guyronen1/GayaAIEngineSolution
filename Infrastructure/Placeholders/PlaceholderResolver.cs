@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.RegularExpressions;
 using MaiaAI.Core.Entities;
 using MaiaAI.Core.Interfaces;
@@ -74,6 +75,11 @@ public sealed class PlaceholderResolver(IDbContextFactory<AiDbContext> factory)
                 "sourceid"       => failure?.SourceId               ?? string.Empty,
                 "sourcelogpath"  => failure?.SourceLogPath           ?? string.Empty,
                 "sourcefilepath" => failure?.SourceFilePath          ?? string.Empty,
+                // Filename-only slice of {sourceFilePath} (handles both \ and /
+                // separators). Empty when no source path was captured. Lets a
+                // CopyFile dest reuse the original name: {inputFolder}\{sourceFileName}.
+                "sourcefilename" => failure?.SourceFilePath is { Length: > 0 } sfp
+                    ? Path.GetFileName(sfp) : string.Empty,
                 "jobfolder"      => failure?.MonitoredJob?.LogFolder ?? string.Empty,
                 "inputfolder"    => failure?.MonitoredJob?.InputFolder ?? string.Empty,
                 _                => m.Value   // unknown → left literal

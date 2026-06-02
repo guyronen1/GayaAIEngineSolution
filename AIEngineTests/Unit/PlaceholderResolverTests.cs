@@ -174,6 +174,41 @@ public class PlaceholderResolverTests : IAsyncLifetime
         Assert.Equal("999999   ", result);
     }
 
+    [Fact]
+    public async Task Resolve_SourceFileName_IsFilenameSliceOfSourceFilePath()
+    {
+        // {sourceFileName} = Path.GetFileName({sourceFilePath}) — lets a CopyFile
+        // dest reuse the original name under a different folder.
+        var rec = MakeRec(FailureId);
+        var result = await _resolver.ResolveAsync(
+            "name={sourceFileName} dest={inputFolder}\\{sourceFileName}", rec);
+
+        Assert.Equal(
+            "name=deposit_20260601.txt dest=C:\\input\\test\\deposit_20260601.txt",
+            result);
+    }
+
+    [Fact]
+    public async Task Resolve_SourceFileName_EmptyWhenNoSourceFilePath()
+    {
+        _db.JobFailures.Add(new JobFailure
+        {
+            FailureId      = FailureId + 3,
+            JobTypeId      = JobTypeId,
+            MonitoredJobId = MonitoredJobId,
+            SourceId       = "z",
+            SourceLogPath  = @"C:\logs\test\app.log",
+            SourceFilePath = null,
+            Status         = JobStatus.Failed,
+        });
+        await _db.SaveChangesAsync();
+
+        var rec    = MakeRec(FailureId + 3);
+        var result = await _resolver.ResolveAsync("[{sourceFileName}]", rec);
+
+        Assert.Equal("[]", result);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
 
     private static AiRecommendation MakeRec(int failureId) => new()
