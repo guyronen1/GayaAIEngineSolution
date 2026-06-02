@@ -40,6 +40,87 @@ public class RecommendationsController(
     public Task<IActionResult> Reject(int id, [FromBody] DecisionRequest req, CancellationToken ct)
         => RecordDecisionAsync(id, approved: false, req, ct);
 
+    /// <summary>
+    /// Re-runs a fix that previously failed to execute. A failed executor
+    /// leaves the failure in <see cref="JobStatus.ManualRequired"/>, and the
+    /// drain's claim guard (<c>Failure.Status == Failed</c>) deliberately keeps
+    /// it from auto-retrying forever. This endpoint is the explicit operator
+    /// override for "I fixed the root cause (e.g. corrected the policy SQL) —
+    /// try the same failure again": it re-arms the recommendation + failure and
+    /// synchronously drains, so the fix re-runs with whatever policy is
+    /// configured NOW. Only valid while the failure is in ManualRequired.
+    /// </summary>
+    [HttpPost("{id:int}/retry")]
+    public async Task<IActionResult> Retry(int id, [FromBody] DecisionRequest req, CancellationToken ct)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.OperatorId))
+            return BadRequest(new { Message = "operatorId is required." });
+
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var rec = await db.AIRecommendations
+            .Include(r => r.Failure)
+            .FirstOrDefaultAsync(r => r.RecommendationId == id, ct);
+
+        if (rec is null)
+            return NotFound(new { Message = $"Recommendation {id} not found." });
+        if (rec.Failure is null)
+            return NotFound(new { Message = $"Failure for recommendation {id} not found." });
+
+        // Retry only makes sense for a fix that failed to execute — i.e. the
+        // failure is sitting in ManualRequired. Block other states so we don't
+        // re-run a fix on an already-Resolved failure or one mid-flight.
+        if (rec.Failure.Status != JobStatus.ManualRequired)
+            return Conflict(new
+            {
+                error   = "RetryNotApplicable",
+                Message = $"Retry only applies to failures in ManualRequired (current: {rec.Failure.Status}).",
+            });
+
+        // Re-arm: clear the executed flag + any stale claim, approve so it's
+        // eligible regardless of AutoFixAvailable, and move the failure back to
+        // Failed so the drain's claim guard lets it through. Persist BEFORE the
+        // drain so the use case's fresh query sees the re-armed row.
+        rec.IsExecuted       = false;
+        rec.OperatorApproved = true;
+        rec.ClaimedBy        = null;
+        rec.ClaimedAt        = null;
+        rec.Failure.Status   = JobStatus.Failed;
+        await db.SaveChangesAsync(ct);
+
+        await operatorActions.SaveAsync(new OperatorAction
+        {
+            RecommendationId = id,
+            OperatorId       = req.OperatorId,
+            ActionTaken      = "Retry",
+            ActionTimestamp  = DateTime.Now,
+        }, ct);
+
+        await audit.WriteAsync(new AuditLog
+        {
+            FailureId  = rec.FailureId,
+            EntityType = "AiRecommendation",
+            EntityId   = id.ToString(),
+            EventType  = "FixRetried",
+            Actor      = req.OperatorId,
+            Detail     = $"Operator {req.OperatorId} retried recommendation {id} — failure re-armed " +
+                         $"from ManualRequired to Failed and re-queued for execution (action: {rec.SuggestedAction}).",
+            Timestamp  = DateTime.Now,
+        }, ct);
+
+        // Synchronous drain — re-runs the fix on this request, same as approve.
+        await execute.ExecuteAsync(ct);
+
+        // Fresh read so the response reflects the post-drain state (Resolved if
+        // the fix now works, ManualRequired again if it still fails).
+        await using var db2 = await dbFactory.CreateDbContextAsync(ct);
+        var after = await db2.AIRecommendations
+            .Include(r => r.ErrorType)
+            .AsNoTracking()
+            .FirstOrDefaultAsync(r => r.RecommendationId == id, ct);
+
+        return Ok(after is null ? (object)new { Message = "Retried." } : RecommendationDto.From(after));
+    }
+
     private async Task<IActionResult> RecordDecisionAsync(
         int id, bool approved, DecisionRequest req, CancellationToken ct)
     {

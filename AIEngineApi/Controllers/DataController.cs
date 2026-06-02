@@ -71,10 +71,56 @@ public class DataController(
         // execute on approve. One small query per failure-detail load.
         var policyInfo = await BuildPolicyInfoAsync(f, ct);
 
+        // Execution history (incl. per-step rows for composite fixes). Surfaced
+        // so the drawer can highlight a failed execution and show which step
+        // succeeded vs failed. Composite step rows are written by
+        // DefaultFixEngine.Composite (ExecutedBy ends ".Composite"); the
+        // single summary row is written by ExecuteFixesUseCase. Ordered
+        // chronologically (FixId is a monotonic shadow of ExecutedAt).
+        List<object> executions;
+        await using (var db = await dbFactory.CreateDbContextAsync(ct))
+        {
+            // Clean EF projection first (no enum.ToString() / object-cast inside
+            // the expression tree — those can fail provider translation), then
+            // shape to the response objects in memory.
+            var rows = await db.FixExecutionLogs
+                .Where(l => l.FailureId == failureId)
+                .OrderBy(l => l.ExecutedAt).ThenBy(l => l.FixId)
+                .Select(l => new
+                {
+                    l.FixId,
+                    l.RecommendationId,
+                    l.ExecutedAction,
+                    l.ExecutedBy,
+                    l.Success,
+                    l.ResultDetail,
+                    l.ExecutedAt,
+                    l.TriggerType,
+                })
+                .ToListAsync(ct);
+
+            executions = rows.Select(l => (object)new
+            {
+                l.FixId,
+                l.RecommendationId,
+                l.ExecutedAction,
+                l.ExecutedBy,
+                l.Success,
+                l.ResultDetail,
+                l.ExecutedAt,
+                TriggerType = l.TriggerType.ToString(),
+            }).ToList();
+        }
+
         return Ok(new
         {
             f.FailureId,
             f.SourceId,
+            // Input file path captured at scan time (FS: InputPathPattern,
+            // DB: FilePathColumn). Surfaced so operators can see what
+            // {sourceFilePath} resolves to for this failure before approving
+            // a CopyFile / SQL fix that references it. Null when uncaptured.
+            f.SourceFilePath,
             f.StepName,
             f.ErrorMessage,
             f.DetectedAt,
@@ -98,6 +144,7 @@ public class DataController(
                 PolicyIsAutoHealEligible = policyInfo.GetValueOrDefault(r.ErrorTypeId).AutoHeal,
                 PolicyStepCount          = policyInfo.GetValueOrDefault(r.ErrorTypeId).StepCount,
             }).ToList(),
+            Executions       = executions,
         });
     }
 
