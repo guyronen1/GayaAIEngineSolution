@@ -7,11 +7,13 @@ namespace MaiaAI.Infrastructure.Fix;
 
 /// <summary>
 /// Executes a fix by calling an HTTP endpoint.
-/// ActionPayload = URL; supports {failureId} placeholder substitution.
+/// ActionPayload = URL; placeholders resolved via IPlaceholderResolver.
 /// Example: http://jobs.internal/api/retry/{failureId}
+/// Per-step timeout: <see cref="ExecutorTimeouts.Default"/> (60s).
 /// </summary>
 public sealed class ApiCallExecutor(
-    IHttpClientFactory httpClientFactory,
+    IHttpClientFactory       httpClientFactory,
+    IPlaceholderResolver     resolver,
     ILogger<ApiCallExecutor> logger) : IFixActionExecutor
 {
     public FixActionType ActionType => FixActionType.ApiCall;
@@ -28,13 +30,17 @@ public sealed class ApiCallExecutor(
             return false;
         }
 
-        var url = payload.Replace("{failureId}", recommendation.FailureId.ToString(),
-            StringComparison.OrdinalIgnoreCase);
+        var url = await resolver.ResolveAsync(payload, recommendation, ct);
+
+        // Per-step hard cap. HttpClient defaults to 100s, longer than our
+        // step contract. The linked CTS guarantees we abandon the request
+        // by 60s even if the upstream server is just slow.
+        using var cts = ExecutorTimeouts.LinkedWithTimeout(ct, ExecutorTimeouts.Default);
 
         try
         {
             var client   = httpClientFactory.CreateClient("FixEngine");
-            var response = await client.PostAsync(url, content: null, ct);
+            var response = await client.PostAsync(url, content: null, cts.Token);
 
             if (response.IsSuccessStatusCode)
             {
@@ -47,6 +53,13 @@ public sealed class ApiCallExecutor(
             logger.LogWarning(
                 "ApiCallExecutor: POST {Url} returned {StatusCode} for Failure {FailureId}",
                 url, (int)response.StatusCode, recommendation.FailureId);
+            return false;
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            logger.LogWarning(
+                "ApiCallExecutor: POST {Url} timed out after {Seconds}s for Failure {FailureId}",
+                url, ExecutorTimeouts.Default.TotalSeconds, recommendation.FailureId);
             return false;
         }
         catch (Exception ex)

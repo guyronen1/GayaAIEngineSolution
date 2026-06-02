@@ -24,9 +24,12 @@ public sealed class FixCatalogue : IFixCatalogue
     public Task<FixCatalogueEntry?> GetEntryAsync(
         string errorTypeCode,
         int    jobTypeId,
+        int?   monitoredJobId = null,
         CancellationToken ct = default)
-        // In-memory fallback intentionally ignores jobTypeId — last-resort defaults are
-        // per-ErrorType only. Operators who need JobType-specific behavior should
-        // configure a FixPolicyRule row (DbFixCatalogue queries it first).
+        // In-memory fallback intentionally ignores both jobTypeId and
+        // monitoredJobId — last-resort defaults are per-ErrorType only.
+        // Operators who need scope-specific behavior should configure a
+        // FixPolicyRule row (DbFixCatalogue queries it first with the
+        // override-then-default priority).
         => Task.FromResult(Entries.TryGetValue(errorTypeCode, out var entry) ? entry : null);
 }

@@ -1,6 +1,8 @@
 ﻿using MaiaAI.Core.Entities;
+using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Results;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
 namespace MaiaAI.Infrastructure.DataAccess.Repositories;
@@ -8,15 +10,74 @@ namespace MaiaAI.Infrastructure.DataAccess.Repositories;
 public sealed class SqlRecommendationRepository(IDbContextFactory<AiDbContext> factory)
     : IRecommendationRepository
 {
-    public async Task<List<AiRecommendation>> GetPendingAsync(CancellationToken ct = default)
+    // Atomic claim SQL — mirrors SqlMonitoredJobLeaseRepository's pattern.
+    // READPAST = skip locked rows (no blocking between concurrent drains);
+    // UPDLOCK + ROWLOCK = take a write-intent lock on the row we update;
+    // TOP(@batchSize) bounds the claim; OUTPUT returns just the claimed ids
+    // so we can do a second load with the Failure include (EF can't easily
+    // do an UPDATE-with-OUTPUT-with-includes in one query, so two queries
+    // it is — both indexed lookups, sub-millisecond each).
+    //
+    // Filter excludes failures already past Failed status (Resolved /
+    // ManualRequired / AwaitingManualAction) so a failed executor that
+    // moved the failure to ManualRequired doesn't re-pull the same rec
+    // every tick. Closes the pre-existing infinite-retry bug.
+    private const string ClaimSql = """
+        UPDATE TOP(@batchSize) r
+        SET    r.ClaimedBy = @claimedBy,
+               r.ClaimedAt = SYSDATETIME()
+        OUTPUT inserted.RecommendationId
+        FROM   AIRecommendations r WITH (READPAST, UPDLOCK, ROWLOCK)
+        JOIN   JobFailures f ON f.FailureId = r.FailureId
+        WHERE  r.IsExecuted = 0
+          AND  (r.OperatorApproved = 1 OR r.AutoFixAvailable = 1)
+          AND  f.Status = 'Failed'
+          AND  (r.ClaimedBy IS NULL OR r.ClaimedAt < @claimExpiry);
+        """;
+
+    public async Task<List<AiRecommendation>> ClaimPendingAsync(
+        string claimedBy, int batchSize, TimeSpan claimTimeout, CancellationToken ct = default)
     {
+        if (batchSize <= 0) return [];
+        var claimExpiry = DateTime.Now - claimTimeout;
+
         await using var db = await factory.CreateDbContextAsync(ct);
-        // Include Failure so DefaultFixEngine can read recommendation.Failure.JobTypeId
-        // for the (JobTypeId + ErrorTypeId) policy lookup without an extra round-trip.
+
+        // Phase 1: atomic claim → list of RecommendationIds.
+        var claimedIds = new List<int>();
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+            await conn.OpenAsync(ct);
+
+        await using (var cmd = (SqlCommand)conn.CreateCommand())
+        {
+            cmd.CommandText = ClaimSql;
+            cmd.Parameters.AddWithValue("@batchSize",   batchSize);
+            cmd.Parameters.AddWithValue("@claimedBy",   claimedBy);
+            cmd.Parameters.AddWithValue("@claimExpiry", claimExpiry);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                claimedIds.Add(reader.GetInt32(0));
+        }
+
+        if (claimedIds.Count == 0) return [];
+
+        // Phase 2: load the claimed recs with Failure include (so the engine
+        // can do the policy lookup without a per-rec round-trip).
         return await db.AIRecommendations
             .Include(r => r.Failure)
-            .Where(r => !r.IsExecuted && (r.OperatorApproved == true || r.AutoFixAvailable))
+            .Where(r => claimedIds.Contains(r.RecommendationId))
             .ToListAsync(ct);
+    }
+
+    public async Task ReleaseClaimAsync(int recommendationId, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        await db.AIRecommendations
+            .Where(r => r.RecommendationId == recommendationId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.ClaimedBy, (string?)null)
+                .SetProperty(r => r.ClaimedAt, (DateTime?)null), ct);
     }
 
     public async Task SaveAsync(AiRecommendation recommendation, CancellationToken ct = default)
@@ -29,10 +90,14 @@ public sealed class SqlRecommendationRepository(IDbContextFactory<AiDbContext> f
     public async Task MarkExecutedAsync(int recommendationId, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        var rec = await db.AIRecommendations.FindAsync([recommendationId], ct);
-        if (rec is null) return;
-        rec.IsExecuted = true;
-        await db.SaveChangesAsync(ct);
+        // Use ExecuteUpdateAsync (no tracked entity load) so the claim
+        // clear + IsExecuted set happen in one round-trip.
+        await db.AIRecommendations
+            .Where(r => r.RecommendationId == recommendationId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.IsExecuted, true)
+                .SetProperty(r => r.ClaimedBy,  (string?)null)
+                .SetProperty(r => r.ClaimedAt,  (DateTime?)null), ct);
     }
 
     public async Task<bool> SetApprovalAsync(int recommendationId, bool approved, CancellationToken ct = default)
@@ -61,30 +126,52 @@ public sealed class SqlRecommendationRepository(IDbContextFactory<AiDbContext> f
 
         var total = await query.CountAsync(ct);
 
-        // Correlated subquery: pick the newest enabled FixPolicyRule for this rec's
-        // (JobTypeId + ErrorTypeId) pair. Mirrors DefaultFixEngine / SqlFixPolicyRepository
-        // semantics exactly — same filter, same tiebreaker — so the UI shows the policy
-        // that will actually be used at execution time.
+        // Two correlated subqueries — override layer first, default layer
+        // second. Project both, then coalesce in memory after the materialise
+        // (LINQ's null-coalescing on subquery results doesn't always translate
+        // cleanly with .Include + .Skip + .Take on top, so the safer shape is
+        // "fetch both, decide in memory"). Both subqueries are guarded by the
+        // filtered unique indexes so each returns at most one row — the
+        // OrderByDescending is just a defensive tiebreaker. Mirrors
+        // SqlFixPolicyRepository.GetForAsync priority exactly so the UI shows
+        // the policy that will actually be used at execution time.
         var raw = await query
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .Select(r => new
             {
-                Rec    = r,
-                Policy = db.FixPolicyRules
+                Rec      = r,
+                Override = r.Failure!.MonitoredJobId == null ? null : db.FixPolicyRules
                     .Where(p => p.Enabled
-                             && p.ErrorTypeId == r.ErrorTypeId
-                             && p.JobTypeId   == r.Failure!.JobTypeId)
+                             && p.ErrorTypeId    == r.ErrorTypeId
+                             && p.MonitoredJobId == r.Failure!.MonitoredJobId)
                     .OrderByDescending(p => p.ActionTimestamp)
-                    .FirstOrDefault()
+                    .Select(p => new { p.RuleId, p.IsAutoHealEligible, StepCount = p.Steps.Count })
+                    .FirstOrDefault(),
+                Default  = db.FixPolicyRules
+                    .Where(p => p.Enabled
+                             && p.ErrorTypeId    == r.ErrorTypeId
+                             && p.JobTypeId      == r.Failure!.JobTypeId
+                             && p.MonitoredJobId == null)
+                    .OrderByDescending(p => p.ActionTimestamp)
+                    .Select(p => new { p.RuleId, p.IsAutoHealEligible, StepCount = p.Steps.Count })
+                    .FirstOrDefault(),
             })
             .ToListAsync(ct);
 
         var items = raw
-            .Select(x => new RecommendationListItem(
-                x.Rec,
-                x.Policy?.RuleId,
-                x.Policy?.IsAutoHealEligible))
+            .Select(x =>
+            {
+                // Override-then-default priority — must match
+                // SqlFixPolicyRepository.GetForAsync exactly so the UI shows
+                // the policy that will actually be used at execution time.
+                var policy = x.Override ?? x.Default;
+                return new RecommendationListItem(
+                    x.Rec,
+                    policy?.RuleId,
+                    policy?.IsAutoHealEligible,
+                    policy?.StepCount ?? 0);
+            })
             .ToList();
 
         return new PagedResult<RecommendationListItem>(items, total, page, pageSize);

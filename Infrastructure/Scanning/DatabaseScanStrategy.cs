@@ -104,7 +104,7 @@ public sealed class DatabaseScanStrategy(
 
             if (rows.Count == 0) continue;
 
-            foreach (var (rowKey, value, wmValue, srcValue) in rows)
+            foreach (var (rowKey, value, wmValue, srcValue, filePathValue) in rows)
             {
                 var failure = new JobFailure
                 {
@@ -115,6 +115,7 @@ public sealed class DatabaseScanStrategy(
                     SourceId       = srcValue ?? rowKey,
                     ErrorMessage   = BuildRowMessage(rule, rowKey, value, wmValue, srcValue),
                     SourceLogPath  = $"db://{job.ConnectionName ?? "DefaultConnection"}/{rule.SourceTable}",
+                    SourceFilePath = filePathValue,   // null when rule.FilePathColumn unset
                     Status         = JobStatus.Failed,
                     DetectedAt     = DateTime.Now,
                 };
@@ -178,7 +179,7 @@ public sealed class DatabaseScanStrategy(
 
     // ── SQL helpers ───────────────────────────────────────────────────────────
 
-    private static async Task<List<(string RowKey, object Value, string? WatermarkValue, string? SourceIdValue)>> QueryMatchingRowsAsync(
+    private static async Task<List<(string RowKey, object Value, string? WatermarkValue, string? SourceIdValue, string? FilePathValue)>> QueryMatchingRowsAsync(
         string connStr, string sourceTable, ScanCheckRule rule, string? watermark, CancellationToken ct)
     {
         var (filterClause, filterParams) = BuildFilterClause(rule);
@@ -186,9 +187,12 @@ public sealed class DatabaseScanStrategy(
             ? $" AND [{rule.WatermarkColumn}] > @Watermark"
             : string.Empty;
 
-        // WatermarkColumn and SourceIdColumn are extra columns selected for tracking and identity.
-        // All column names and table come from admin config and are bracketed.
+        // WatermarkColumn / SourceIdColumn / FilePathColumn are extra columns
+        // projected for tracking, identity, and composite-fix path capture.
+        // All column names and the table come from admin config and are bracketed.
         // All filter values are always parameterised.
+        // FilePathColumn supports a dotted "alias.Column" form (rare) — bracket
+        // only the column portion so a JOIN encoded in SourceTable still works.
         var quotedTable = QuoteTable(sourceTable);
         // Style 121 = ISO `yyyy-mm-dd hh:mi:ss.fffffff` (full datetime2 precision).
         // For non-date columns the style is silently ignored and you get the default text form.
@@ -197,6 +201,9 @@ public sealed class DatabaseScanStrategy(
             : string.Empty;
         var srcSelect = rule.SourceIdColumn is not null
             ? $", CAST([{rule.SourceIdColumn}] AS NVARCHAR(100)) AS _SourceIdVal"
+            : string.Empty;
+        var fpSelect  = !string.IsNullOrEmpty(rule.FilePathColumn)
+            ? $", CAST({QuoteColumnRef(rule.FilePathColumn)} AS NVARCHAR(500)) AS _FilePathVal"
             : string.Empty;
 
         var orderBy = rule.WatermarkColumn is not null
@@ -209,11 +216,12 @@ public sealed class DatabaseScanStrategy(
                 [{rule.TargetField}]
                 {wmSelect}
                 {srcSelect}
+                {fpSelect}
             FROM {quotedTable}
             WHERE {filterClause}{watermarkFilter}
             """;
 
-        var rows = new List<(string, object, string?, string?)>();
+        var rows = new List<(string, object, string?, string?, string?)>();
         await using var conn = new SqlConnection(connStr);
         await conn.OpenAsync(ct);
         await using var cmd = new SqlCommand(sql, conn);
@@ -233,12 +241,30 @@ public sealed class DatabaseScanStrategy(
                 ? (!reader.IsDBNull(nextCol++) ? reader.GetString(nextCol - 1) : null)
                 : null;
             var srcVal  = rule.SourceIdColumn is not null
+                ? (!reader.IsDBNull(nextCol++) ? reader.GetString(nextCol - 1) : null)
+                : null;
+            var fpVal   = !string.IsNullOrEmpty(rule.FilePathColumn)
                 ? (!reader.IsDBNull(nextCol)   ? reader.GetString(nextCol)     : null)
                 : null;
-            rows.Add((rowKey, val, wmVal, srcVal));
+            rows.Add((rowKey, val, wmVal, srcVal, fpVal));
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// Bracket a single column reference, supporting an optional "alias.Column"
+    /// form used when the operator put a JOIN into SourceTable. Examples:
+    ///   "FilePath"       → "[FilePath]"
+    ///   "j.FilePath"     → "j.[FilePath]"
+    /// Only the column part is bracketed so the alias resolves naturally.
+    /// </summary>
+    private static string QuoteColumnRef(string columnRef)
+    {
+        var dot = columnRef.LastIndexOf('.');
+        return dot < 0
+            ? $"[{columnRef}]"
+            : $"{columnRef[..dot]}.[{columnRef[(dot + 1)..]}]";
     }
 
     /// <summary>
@@ -279,12 +305,16 @@ public sealed class DatabaseScanStrategy(
         if (rule.CheckType == CheckType.ValueEquals)
         {
             p.Add(("@ExactVal", rule.ExpectedValue!));
-            return ($"[{rule.TargetField}] = @ExactVal", p);
+            return ($"([{rule.TargetField}] = @ExactVal)", p);
         }
-        // ColumnRange
+        // ColumnRange — wrap in parentheses so callers can safely AND
+        // additional conditions onto this clause without the precedence bug
+        // where (a OR b) AND c parses as a OR (b AND c). The watermark filter
+        // in QueryMatchingRowsAsync is exactly that "additional AND" case;
+        // unparenthesized, it would bypass the OR's left branch entirely.
         var conditions = new List<string>();
         if (rule.MinValue.HasValue) { conditions.Add($"[{rule.TargetField}] < @Min"); p.Add(("@Min", rule.MinValue.Value)); }
         if (rule.MaxValue.HasValue) { conditions.Add($"[{rule.TargetField}] > @Max"); p.Add(("@Max", rule.MaxValue.Value)); }
-        return (string.Join(" OR ", conditions), p);
+        return ($"({string.Join(" OR ", conditions)})", p);
     }
 }

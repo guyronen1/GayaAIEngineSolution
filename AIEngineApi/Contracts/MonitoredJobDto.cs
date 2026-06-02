@@ -13,6 +13,7 @@ public sealed record MonitoredJobDto(
     // FileSystem
     string?                          LogFolder,
     string?                          SearchPatterns,
+    string?                          InputFolder,
     // Database
     string?                          ConnectionName,
     // ApiEndpoint
@@ -34,6 +35,7 @@ public sealed record MonitoredJobDto(
         m.ScanType.ToString(),
         m.LogFolder,
         m.SearchPatterns,
+        m.InputFolder,
         m.ConnectionName,
         m.LogSourceUrl,
         m.PollingIntervalSeconds,
@@ -94,6 +96,8 @@ public sealed record ScanCheckRuleDto(
     string?   ExpectedValue,
     string?   WatermarkColumn,
     string?   SourceIdColumn,
+    string?   FilePathColumn,
+    string?   InputPathPattern,
     string    Severity,
     string?   Description)
 {
@@ -107,6 +111,8 @@ public sealed record ScanCheckRuleDto(
         r.ExpectedValue,
         r.WatermarkColumn,
         r.SourceIdColumn,
+        r.FilePathColumn,
+        r.InputPathPattern,
         r.Severity.ToString(),
         r.Description);
 }

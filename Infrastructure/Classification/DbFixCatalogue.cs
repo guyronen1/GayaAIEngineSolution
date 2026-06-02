@@ -28,25 +28,27 @@ public sealed class DbFixCatalogue(
     public async Task<FixCatalogueEntry?> GetEntryAsync(
         string errorTypeCode,
         int    jobTypeId,
+        int?   monitoredJobId = null,
         CancellationToken ct = default)
     {
-        // 1. Try the DB for an exact (JobType, ErrorType) match.
-        var dbEntry = await catalogueRepo.GetEntryAsync(errorTypeCode, jobTypeId, ct);
+        // 1. Try the DB for an override (per-MonitoredJob) or default
+        // (per-JobType) match — the repo handles priority internally.
+        var dbEntry = await catalogueRepo.GetEntryAsync(errorTypeCode, jobTypeId, monitoredJobId, ct);
         if (dbEntry is not null)
         {
             logger.LogDebug(
-                "FixCatalogue: DB entry used for (jobTypeId={JobTypeId}, {ErrorTypeCode})",
-                jobTypeId, errorTypeCode);
+                "FixCatalogue: DB entry used for ({ErrorTypeCode}, jobTypeId={JobTypeId}, monitoredJobId={MonitoredJobId})",
+                errorTypeCode, jobTypeId, monitoredJobId);
             return dbEntry;
         }
 
         // 2. Last-resort: ErrorType-only static defaults. Operators who need
-        // JobType-specific behavior must add a FixPolicyRule row.
+        // JobType- or MonitoredJob-specific behavior must add a FixPolicyRule.
         if (Defaults.TryGetValue(errorTypeCode, out var fallback))
         {
             logger.LogDebug(
-                "FixCatalogue: default entry used for {ErrorTypeCode} (no FixPolicyRule for jobTypeId={JobTypeId})",
-                errorTypeCode, jobTypeId);
+                "FixCatalogue: default entry used for {ErrorTypeCode} (no FixPolicyRule for jobTypeId={JobTypeId}, monitoredJobId={MonitoredJobId})",
+                errorTypeCode, jobTypeId, monitoredJobId);
             return fallback;
         }
 

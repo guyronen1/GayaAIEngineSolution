@@ -1,8 +1,11 @@
-﻿using MaiaAI.Core.Entities;
+﻿using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
+using MaiaAI.Core.Entities;
 using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Interfaces.UseCases;
 using MaiaAI.Core.Results;
+using MaiaAI.Core.Scanning;
 using Microsoft.Extensions.Logging;
 
 namespace MaiaAI.Infrastructure.Scanning;
@@ -19,6 +22,11 @@ public sealed class FileSystemScanStrategy(
     /// Protects against a pathologically error-filled log chunk spawning thousands of rows.</summary>
     private const int MaxFailuresPerKeywordPerScan = 100;
 
+    /// <summary>Per-strategy-instance cache of compiled InputPathPattern regexes.
+    /// Lifetime = scan scope (one strategy per DI scope per tick), so the cache
+    /// turns over naturally and never grows unbounded across runs.</summary>
+    private readonly ConcurrentDictionary<string, Regex?> _regexCache = new();
+
     public ScanType ScanType => ScanType.FileSystem;
 
     public async Task<ScanResult> ScanAsync(MonitoredJob job, CancellationToken ct = default)
@@ -26,8 +34,22 @@ public sealed class FileSystemScanStrategy(
         if (job.LogFolder is null)
             throw new InvalidOperationException($"Job '{job.Name}' has no LogFolder configured for FileSystem scan.");
 
+        // Filename pattern grammar: see FilenamePattern — '*' is the ONLY
+        // wildcard, every other character is literal, no-'*' patterns are
+        // case-insensitive substring. Operator splits multiple patterns by
+        // comma; empty entries are dropped here. Whitespace-only entries
+        // would be filtered later by FilenamePattern.Matches returning false.
         var patterns = (job.SearchPatterns ?? "*.log")
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .ToArray();
+
+        if (patterns.Length == 0)
+        {
+            logger.LogWarning(
+                "FileSystemScan '{Job}': SearchPatterns is empty after trimming — no files will be scanned",
+                job.Name);
+        }
 
         var keywordRules = job.ScanCheckRules
             .Where(r => r.IsActive && r.CheckType == CheckType.ErrorKeyword)
@@ -66,9 +88,21 @@ public sealed class FileSystemScanStrategy(
 
         var created = new List<JobFailure>();
 
+        // Enumerate ALL files once per scan tick; filter by pattern in code
+        // using the FilenamePattern DSL (NOT Directory.GetFiles's native glob,
+        // which (a) treats no-'*' as exact filename match, not substring,
+        // (b) accepts '?' as a single-char wildcard, and (c) is case-sensitive
+        // on Linux/macOS). This keeps behaviour identical across platforms and
+        // matches the classification-rule pattern convention.
+        // No-arg EnumerateFiles overload returns ALL files, avoiding the
+        // Win32-`*` legacy quirk where "*" can match files-with-no-extension only.
+        var allFiles = Directory.EnumerateFiles(job.LogFolder).ToList();
+
         foreach (var pattern in patterns)
         {
-            var files = Directory.GetFiles(job.LogFolder, pattern, SearchOption.TopDirectoryOnly);
+            var files = allFiles
+                .Where(f => FilenamePattern.Matches(Path.GetFileName(f), pattern))
+                .ToList();
 
             foreach (var file in files)
             {
@@ -116,6 +150,23 @@ public sealed class FileSystemScanStrategy(
                             continue; // identical line text already produced a failure this scan
                         if (excerpt.Length > 500) excerpt = excerpt[..500];
 
+                        // Input-path extraction (composite-fix support). Captures
+                        // the INPUT file the failing process was acting on — distinct
+                        // from `file` which is the LOG file where we found the error.
+                        // Null when the rule has no InputPathPattern configured, the
+                        // regex didn't match, or the capture was relative without an
+                        // InputFolder on the job. Logged at Info so operators can grep.
+                        string? sourceFilePath = null;
+                        if (!string.IsNullOrEmpty(rule.InputPathPattern))
+                        {
+                            sourceFilePath = ExtractInputPath(rawLine, rule.InputPathPattern, job.InputFolder);
+                            if (sourceFilePath is null)
+                                logger.LogInformation(
+                                    "FileSystemScan '{Job}': InputPathPattern on rule {RuleId} did not capture in line — line snippet: {Excerpt}",
+                                    job.Name, rule.CheckRuleId,
+                                    excerpt[..Math.Min(80, excerpt.Length)]);
+                        }
+
                         var failure = new JobFailure
                         {
                             JobId          = 0,
@@ -125,6 +176,7 @@ public sealed class FileSystemScanStrategy(
                             SourceId       = Path.GetFileName(file),
                             ErrorMessage   = $"[{keyword}] {Path.GetFileName(file)}: {excerpt}",
                             SourceLogPath  = file,
+                            SourceFilePath = sourceFilePath,
                             Status         = JobStatus.Failed,
                             DetectedAt     = DateTime.Now,
                         };
@@ -153,6 +205,56 @@ public sealed class FileSystemScanStrategy(
         result.Recommendations = classifications.Count;
 
         return result;
+    }
+
+    /// <summary>
+    /// Compile-then-match a rule's <see cref="ScanCheckRule.InputPathPattern"/>
+    /// against a single matching line. Returns the resolved (absolute) input
+    /// file path on success, null on any non-match path:
+    ///   - regex is invalid (config bug) — swallowed, returns null
+    ///   - regex matched but had no capture group
+    ///   - regex matched with capture group #1 empty
+    ///   - capture is relative and no InputFolder on the job
+    ///   - regex match timed out (50ms hard cap, pathological pattern)
+    ///
+    /// Compiled regexes are cached on the strategy instance per-pattern so
+    /// repeated lines for the same rule don't re-compile.
+    /// </summary>
+    private string? ExtractInputPath(string line, string pattern, string? inputFolder)
+    {
+        var rx = _regexCache.GetOrAdd(pattern, CompileSafely);
+        if (rx is null) return null;
+
+        Match match;
+        try { match = rx.Match(line); }
+        catch (RegexMatchTimeoutException) { return null; }
+
+        if (!match.Success || match.Groups.Count < 2) return null;
+
+        var captured = match.Groups[1].Value.Trim();
+        if (captured.Length == 0) return null;
+
+        if (Path.IsPathRooted(captured))
+            return captured;
+
+        if (string.IsNullOrEmpty(inputFolder))
+        {
+            logger.LogWarning(
+                "InputPathPattern captured relative path '{Captured}' but job has no InputFolder configured — SourceFilePath will be null",
+                captured);
+            return null;
+        }
+        return Path.Combine(inputFolder, captured);
+    }
+
+    private static Regex? CompileSafely(string pattern)
+    {
+        try
+        {
+            return new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.Compiled,
+                TimeSpan.FromMilliseconds(50));
+        }
+        catch (ArgumentException) { return null; }
     }
 
     private async Task<(string Content, long NewOffset)> ReadNewContentAsync(

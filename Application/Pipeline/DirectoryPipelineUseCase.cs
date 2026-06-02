@@ -4,6 +4,7 @@ using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Interfaces.UseCases;
 using MaiaAI.Core.Results;
+using MaiaAI.Core.Scanning;
 using Microsoft.Extensions.Logging;
 
 namespace MaiaAI.Application.Pipeline;
@@ -30,7 +31,17 @@ public sealed class DirectoryPipelineUseCase(
             throw new DirectoryNotFoundException(directoryPath);
 
         var option = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-        var files  = Directory.EnumerateFiles(directoryPath, searchPattern, option).ToList();
+        // Filter via the shared FilenamePattern DSL (same convention as
+        // classification-rule patterns): '*' is the ONLY wildcard, every
+        // other character is literal, no-'*' patterns are case-insensitive
+        // SUBSTRING match. Enumerating all files with the no-pattern overload
+        // sidesteps the Win32-`*` legacy quirk (matches no-extension files
+        // only) and gives cross-platform-consistent semantics.
+        var files = string.IsNullOrWhiteSpace(searchPattern)
+            ? Directory.EnumerateFiles(directoryPath, "*", option).ToList()
+            : Directory.EnumerateFiles(directoryPath, "*", option)
+                .Where(f => FilenamePattern.Matches(Path.GetFileName(f), searchPattern))
+                .ToList();
 
         var result = new DirectoryPipelineResult
         {

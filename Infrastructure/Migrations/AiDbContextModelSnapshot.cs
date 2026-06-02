@@ -35,6 +35,13 @@ namespace Infrastructure.Migrations
                         .HasColumnType("bit")
                         .HasDefaultValue(false);
 
+                    b.Property<DateTime?>("ClaimedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("ClaimedBy")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
                     b.Property<decimal>("ConfidenceScore")
                         .HasPrecision(5, 2)
                         .HasColumnType("decimal(5,2)");
@@ -77,6 +84,10 @@ namespace Infrastructure.Migrations
 
                     b.HasIndex("FailureId");
 
+                    b.HasIndex("IsExecuted", "ClaimedAt")
+                        .HasDatabaseName("IX_AIRecommendations_ClaimEligible")
+                        .HasFilter("[IsExecuted] = 0");
+
                     b.ToTable("AIRecommendations", (string)null);
                 });
 
@@ -96,12 +107,20 @@ namespace Infrastructure.Migrations
                     b.Property<string>("Detail")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("EntityId")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("EntityType")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
                     b.Property<string>("EventType")
                         .IsRequired()
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
-                    b.Property<int>("FailureId")
+                    b.Property<int?>("FailureId")
                         .HasColumnType("int");
 
                     b.Property<DateTime>("Timestamp")
@@ -434,11 +453,22 @@ namespace Infrastructure.Migrations
                     b.Property<int>("JobTypeId")
                         .HasColumnType("int");
 
+                    b.Property<int?>("MonitoredJobId")
+                        .HasColumnType("int");
+
                     b.HasKey("RuleId");
 
                     b.HasIndex("ErrorTypeId");
 
-                    b.HasIndex("JobTypeId");
+                    b.HasIndex("JobTypeId", "ErrorTypeId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_FixPolicyRules_DefaultActiveKey")
+                        .HasFilter("[Enabled] = 1 AND [MonitoredJobId] IS NULL");
+
+                    b.HasIndex("MonitoredJobId", "ErrorTypeId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_FixPolicyRules_OverrideActiveKey")
+                        .HasFilter("[Enabled] = 1 AND [MonitoredJobId] IS NOT NULL");
 
                     b.ToTable("FixPolicyRules", (string)null);
 
@@ -457,6 +487,42 @@ namespace Infrastructure.Migrations
                             IsAutoHealEligible = true,
                             JobTypeId = 1
                         });
+                });
+
+            modelBuilder.Entity("MaiaAI.Core.Entities.FixPolicyRuleStep", b =>
+                {
+                    b.Property<int>("StepId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("StepId"));
+
+                    b.Property<string>("ActionPayload")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ActionType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<int>("RuleId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("StepOrder")
+                        .HasColumnType("int");
+
+                    b.HasKey("StepId");
+
+                    b.HasIndex("RuleId", "StepOrder")
+                        .IsUnique()
+                        .HasDatabaseName("UX_FixPolicyRuleSteps_RuleId_StepOrder");
+
+                    b.ToTable("FixPolicyRuleSteps", (string)null);
                 });
 
             modelBuilder.Entity("MaiaAI.Core.Entities.JobFailure", b =>
@@ -486,6 +552,10 @@ namespace Infrastructure.Migrations
 
                     b.Property<int?>("MonitoredJobId")
                         .HasColumnType("int");
+
+                    b.Property<string>("SourceFilePath")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
 
                     b.Property<string>("SourceId")
                         .HasMaxLength(500)
@@ -596,6 +666,10 @@ namespace Infrastructure.Migrations
                     b.Property<string>("DisplayName")
                         .HasMaxLength(300)
                         .HasColumnType("nvarchar(300)");
+
+                    b.Property<string>("InputFolder")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
 
                     b.Property<bool>("IsActive")
                         .ValueGeneratedOnAdd()
@@ -798,6 +872,14 @@ namespace Infrastructure.Migrations
                         .HasColumnType("nvarchar(500)");
 
                     b.Property<string>("ExpectedValue")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<string>("FilePathColumn")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("InputPathPattern")
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
 
@@ -1042,8 +1124,7 @@ namespace Infrastructure.Migrations
                     b.HasOne("MaiaAI.Core.Entities.JobFailure", "Failure")
                         .WithMany("AuditLogs")
                         .HasForeignKey("FailureId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
+                        .OnDelete(DeleteBehavior.Cascade);
 
                     b.Navigation("Failure");
                 });
@@ -1100,9 +1181,27 @@ namespace Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("MaiaAI.Core.Entities.MonitoredJob", "MonitoredJob")
+                        .WithMany()
+                        .HasForeignKey("MonitoredJobId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.Navigation("ErrorType");
 
                     b.Navigation("JobType");
+
+                    b.Navigation("MonitoredJob");
+                });
+
+            modelBuilder.Entity("MaiaAI.Core.Entities.FixPolicyRuleStep", b =>
+                {
+                    b.HasOne("MaiaAI.Core.Entities.FixPolicyRule", "Rule")
+                        .WithMany("Steps")
+                        .HasForeignKey("RuleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Rule");
                 });
 
             modelBuilder.Entity("MaiaAI.Core.Entities.JobFailure", b =>
@@ -1253,6 +1352,11 @@ namespace Infrastructure.Migrations
                     b.Navigation("JobFailures");
 
                     b.Navigation("Recommendations");
+                });
+
+            modelBuilder.Entity("MaiaAI.Core.Entities.FixPolicyRule", b =>
+                {
+                    b.Navigation("Steps");
                 });
 
             modelBuilder.Entity("MaiaAI.Core.Entities.JobFailure", b =>

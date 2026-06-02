@@ -46,18 +46,28 @@ public sealed class StoredProcedureExecutor(
             return false;
         }
 
+        using var cts = ExecutorTimeouts.LinkedWithTimeout(ct, ExecutorTimeouts.Default);
+
         try
         {
-            await using var db = await factory.CreateDbContextAsync(ct);
+            await using var db = await factory.CreateDbContextAsync(cts.Token);
+            db.Database.SetCommandTimeout((int)ExecutorTimeouts.Default.TotalSeconds);
             var failureIdParam = new SqlParameter("@FailureId", recommendation.FailureId);
 
             await db.Database.ExecuteSqlRawAsync(
-                $"EXEC {spName} @FailureId", failureIdParam, ct);
+                $"EXEC {spName} @FailureId", new[] { failureIdParam }, cts.Token);
 
             logger.LogInformation(
                 "StoredProcedureExecutor: Executed {SpName} for Failure {FailureId}",
                 spName, recommendation.FailureId);
             return true;
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            logger.LogWarning(
+                "StoredProcedureExecutor: {SpName} timed out after {Seconds}s for Failure {FailureId}",
+                spName, ExecutorTimeouts.Default.TotalSeconds, recommendation.FailureId);
+            return false;
         }
         catch (Exception ex)
         {

@@ -44,6 +44,27 @@ public class ScanCheckRule
     /// </summary>
     public string? SourceIdColumn { get; set; }
 
+    /// <summary>
+    /// Database scans only. Column on the source row that holds the input
+    /// file path. Read alongside the rule's check and stuffed into
+    /// JobFailure.SourceFilePath so {sourceFilePath}-using fix steps can
+    /// act on the file the failing process was operating on.
+    ///
+    /// v1: no join logic; if the path lives on a related table the
+    /// operator puts the JOIN into SourceTable directly.
+    /// </summary>
+    public string? FilePathColumn { get; set; }
+
+    /// <summary>
+    /// FileSystem scans only. Regex with capture group #1 = input file path
+    /// extracted from the error line. Compiled with 50ms timeout. NULL =
+    /// FS scan leaves JobFailure.SourceFilePath null for this rule.
+    ///
+    /// Distinct DSL from the wildcard-style classification patterns —
+    /// full regex applies here because capture groups are required.
+    /// </summary>
+    public string? InputPathPattern { get; set; }
+
     public Severity Severity    { get; set; } = Severity.Medium;
     public string?  Description { get; set; }
     public bool     IsActive    { get; set; } = true;

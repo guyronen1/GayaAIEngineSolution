@@ -15,9 +15,21 @@ public interface IJobRepository
     /// <summary>
     /// Paged listing of failures. <paramref name="view"/> filters server-side:
     /// <c>active</c>, <c>unclassified</c>, <c>awaiting-action</c>, <c>auto-fixed</c>,
-    /// <c>operator-fixed</c>. Null/empty/unknown → unfiltered.
+    /// <c>operator-fixed</c>, <c>resolved</c>, <c>manual-required</c>, <c>fix-failed</c>
+    /// (Status=ManualRequired AND has a Success=false FixExecutionLog since
+    /// today-midnight). Null/empty/unknown → unfiltered.
     /// </summary>
     Task<PagedResult<JobFailure>> GetPagedAsync(int page, int pageSize, string? view = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Given a set of <c>FailureId</c>s, return the subset that has at least
+    /// one <see cref="Entities.FixExecutionLog"/> row with <c>Success = false</c>
+    /// since <paramref name="since"/> (typically server-local midnight).
+    /// Batched: one query for the whole page, not one per row. Used by the
+    /// failures-list endpoint to flag "Failed to Execute" rows.
+    /// </summary>
+    Task<HashSet<int>> GetIdsWithRecentFixFailureAsync(
+        IReadOnlyCollection<int> failureIds, DateTime since, CancellationToken ct = default);
 
     /// <summary>
     /// Returns true when a non-resolved failure already exists for this job/table/column combo,

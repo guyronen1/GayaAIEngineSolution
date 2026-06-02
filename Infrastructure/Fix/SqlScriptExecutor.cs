@@ -17,13 +17,15 @@ namespace MaiaAI.Infrastructure.Fix;
 ///   2. The failure's MonitoredJob.ConnectionName (set by Database scan jobs)
 ///   3. "DefaultConnection" (AIEngineDb itself)
 ///
-/// Placeholder substitution (case-insensitive):
-///   {failureId} → JobFailure.FailureId (int)
-///   {sourceId}  → JobFailure.SourceId  (string; e.g. the source row's GUID/key)
+/// Placeholder substitution is delegated to IPlaceholderResolver — see
+/// that interface for the full token list. Substitution is non-strict;
+/// unresolved placeholders become empty strings (a SQL that uses
+/// {sourceId} on a failure with null SourceId still runs against "").
 /// </summary>
 public sealed class SqlScriptExecutor(
     IDbContextFactory<AiDbContext> factory,
     IConfiguration                 config,
+    IPlaceholderResolver           resolver,
     ILogger<SqlScriptExecutor>     logger) : IFixActionExecutor
 {
     public FixActionType ActionType => FixActionType.SqlScript;
@@ -42,10 +44,13 @@ public sealed class SqlScriptExecutor(
 
         var (connectionName, sqlTemplate) = SplitPayload(payload);
 
-        // Look up the failure for SourceId + MonitoredJob.ConnectionName fallback
+        // Connection string still needs the failure's MonitoredJob.ConnectionName
+        // as a fallback — that lookup stays here. Placeholder substitution moves
+        // to IPlaceholderResolver.
         await using var db = await factory.CreateDbContextAsync(ct);
         var failure = await db.JobFailures
             .Include(j => j.MonitoredJob)
+            .AsNoTracking()
             .FirstOrDefaultAsync(j => j.FailureId == recommendation.FailureId, ct);
 
         if (failure is null)
@@ -64,16 +69,21 @@ public sealed class SqlScriptExecutor(
             return false;
         }
 
-        var sql = sqlTemplate
-            .Replace("{failureId}", recommendation.FailureId.ToString(), StringComparison.OrdinalIgnoreCase)
-            .Replace("{sourceId}",  failure.SourceId ?? string.Empty,    StringComparison.OrdinalIgnoreCase);
+        var sql = await resolver.ResolveAsync(sqlTemplate, recommendation, ct);
+
+        // Hard per-step wall clock — SqlClient's default is 30s but it's the
+        // *server-side* execution timeout, not a wall-clock guarantee. Pair
+        // with the linked CTS so both the operator's cancel AND the per-step
+        // cap can interrupt mid-query.
+        using var cts = ExecutorTimeouts.LinkedWithTimeout(ct, ExecutorTimeouts.Default);
 
         try
         {
             await using var conn = new SqlConnection(connStr);
-            await conn.OpenAsync(ct);
+            await conn.OpenAsync(cts.Token);
             await using var cmd = new SqlCommand(sql, conn);
-            var affected = await cmd.ExecuteNonQueryAsync(ct);
+            cmd.CommandTimeout = (int)ExecutorTimeouts.Default.TotalSeconds;
+            var affected = await cmd.ExecuteNonQueryAsync(cts.Token);
 
             logger.LogInformation(
                 "SqlScriptExecutor: Script executed for Failure {FailureId} on '{ConnectionName}', rows affected: {Rows}",
@@ -81,6 +91,15 @@ public sealed class SqlScriptExecutor(
 
             // Zero rows affected → SQL ran but matched nothing. Treat as failure so operator can investigate.
             return affected > 0;
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // Per-step timeout fired (not the outer cancellation). Surface as
+            // a distinct log so operators can grep for "timed out" patterns.
+            logger.LogWarning(
+                "SqlScriptExecutor: Script timed out after {Seconds}s for Failure {FailureId} on '{ConnectionName}'",
+                ExecutorTimeouts.Default.TotalSeconds, recommendation.FailureId, connectionName);
+            return false;
         }
         catch (Exception ex)
         {

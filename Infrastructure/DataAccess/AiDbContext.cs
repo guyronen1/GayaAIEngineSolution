@@ -11,6 +11,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
     public DbSet<JobFailure>       JobFailures         => Set<JobFailure>();
     public DbSet<ClassificationRule> ClassificationRules => Set<ClassificationRule>();
     public DbSet<FixPolicyRule>    FixPolicyRules      => Set<FixPolicyRule>();
+    public DbSet<FixPolicyRuleStep> FixPolicyRuleSteps => Set<FixPolicyRuleStep>();
     public DbSet<AiRecommendation> AIRecommendations   => Set<AiRecommendation>();
     public DbSet<OperatorAction>   OperatorActions     => Set<OperatorAction>();
     public DbSet<FixExecutionLog>  FixExecutionLogs    => Set<FixExecutionLog>();
@@ -31,6 +32,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
         ConfigureJobFailure(mb);
         ConfigureClassificationRule(mb);
         ConfigureFixPolicyRule(mb);
+        ConfigureFixPolicyRuleStep(mb);
         ConfigureAiRecommendation(mb);
         ConfigureOperatorAction(mb);
         ConfigureFixExecutionLog(mb);
@@ -86,6 +88,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(j => j.ErrorMessage).HasColumnType("nvarchar(max)");
             e.Property(j => j.DetectedAt).IsRequired().HasDefaultValueSql("GETDATE()");
             e.Property(j => j.SourceLogPath).IsRequired().HasMaxLength(200);
+            e.Property(j => j.SourceFilePath).HasMaxLength(500);
             e.Property(j => j.Status).IsRequired().HasMaxLength(50).HasConversion<string>();
 
             e.HasOne(j => j.JobType)
@@ -153,6 +156,69 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
                 .WithMany(et => et.FixPolicyRules)
                 .HasForeignKey(r => r.ErrorTypeId)
                 .OnDelete(DeleteBehavior.Restrict);
+
+            // Optional override scope. NULL = JobType-level default (current
+            // semantics for existing rows); non-NULL = per-MonitoredJob override
+            // that wins over the default for that one job.
+            // OnDelete(Restrict) is defensive against future hard-deletes —
+            // today MonitoredJob.DeleteAsync is a soft-delete (sets IsActive=
+            // false) so this FK never fires in practice. If a hard-delete is
+            // ever introduced, the restriction surfaces a SQL error before any
+            // operator's override gets silently erased; controller layer can
+            // translate to a clean 409 at that point.
+            e.HasOne(r => r.MonitoredJob)
+                .WithMany()
+                .HasForeignKey(r => r.MonitoredJobId)
+                .IsRequired(false)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // Two parallel filtered unique indexes — one per layer.
+            //   Defaults: at most one enabled (JobType, ErrorType) pair when
+            //             MonitoredJobId IS NULL.
+            //   Overrides: at most one enabled (MonitoredJob, ErrorType) pair
+            //              when MonitoredJobId IS NOT NULL.
+            // A default and an override for the same (JobType, ErrorType) are
+            // NOT duplicates — they're complementary by design. The earlier
+            // single index UX_FixPolicyRules_ActiveKey is replaced by this
+            // two-index pattern in the migration; existing rows (all with
+            // MonitoredJobId=NULL) carry over cleanly under the Default index.
+            e.HasIndex(r => new { r.JobTypeId, r.ErrorTypeId })
+                .HasDatabaseName("UX_FixPolicyRules_DefaultActiveKey")
+                .IsUnique()
+                .HasFilter("[Enabled] = 1 AND [MonitoredJobId] IS NULL");
+
+            e.HasIndex(r => new { r.MonitoredJobId, r.ErrorTypeId })
+                .HasDatabaseName("UX_FixPolicyRules_OverrideActiveKey")
+                .IsUnique()
+                .HasFilter("[Enabled] = 1 AND [MonitoredJobId] IS NOT NULL");
+        });
+    }
+
+    private static void ConfigureFixPolicyRuleStep(ModelBuilder mb)
+    {
+        mb.Entity<FixPolicyRuleStep>(e =>
+        {
+            e.ToTable("FixPolicyRuleSteps");
+            e.HasKey(s => s.StepId);
+            e.Property(s => s.ActionType).IsRequired().HasMaxLength(50).HasConversion<string>();
+            e.Property(s => s.ActionPayload).IsRequired().HasColumnType("nvarchar(max)");
+            e.Property(s => s.Description).HasMaxLength(200);
+
+            // Cascade is intentional here — unlike FixPolicyRule.MonitoredJobId
+            // which uses Restrict (overrides outlive jobs), steps cannot exist
+            // without their parent rule. Deleting the rule obliterates steps.
+            e.HasOne(s => s.Rule)
+                .WithMany(r => r.Steps)
+                .HasForeignKey(s => s.RuleId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // (RuleId, StepOrder) is unique — every step has a distinct order
+            // within its rule. Not filtered: even disabled rules need ordered
+            // steps for editing. Controller normalises gaps to 1..N before
+            // persist so the operator never trips on this.
+            e.HasIndex(s => new { s.RuleId, s.StepOrder })
+                .HasDatabaseName("UX_FixPolicyRuleSteps_RuleId_StepOrder")
+                .IsUnique();
         });
     }
 
@@ -169,6 +235,17 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(r => r.RecommendedAt).IsRequired().HasDefaultValueSql("GETDATE()");
             e.Property(r => r.AutoFixAvailable).HasDefaultValue(false);
             e.Property(r => r.IsExecuted).HasDefaultValue(false);
+            e.Property(r => r.ClaimedBy).HasMaxLength(200);
+            // ClaimedAt is plain datetime2; no default — null means "unclaimed".
+
+            // Partial index supports the atomic claim query — small (most rows
+            // are IsExecuted=1 historical data, excluded here) and gives the
+            // claim UPDATE a fast scan. Filter is intentionally NOT keyed on
+            // OperatorApproved/AutoFixAvailable because either branch is
+            // valid for claiming; the UPDATE's WHERE clause adds those.
+            e.HasIndex(r => new { r.IsExecuted, r.ClaimedAt })
+                .HasDatabaseName("IX_AIRecommendations_ClaimEligible")
+                .HasFilter("[IsExecuted] = 0");
 
             e.HasOne(r => r.Failure)
                 .WithMany(f => f.Recommendations)
@@ -229,11 +306,20 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
         {
             e.ToTable("AuditLog");
             e.HasKey(a => a.AuditId);
+            // EntityType / EntityId discriminate config audits from
+            // failure-scoped ones. Both nullable for backward compatibility
+            // with legacy rows; new writes always populate them.
+            e.Property(a => a.EntityType).HasMaxLength(100);
+            e.Property(a => a.EntityId).HasMaxLength(100);
             e.Property(a => a.EventType).IsRequired().HasMaxLength(100);
             e.Property(a => a.Actor).IsRequired().HasMaxLength(100);
             e.Property(a => a.Detail).HasColumnType("nvarchar(max)");
             e.Property(a => a.Timestamp).IsRequired().HasDefaultValueSql("GETDATE()");
 
+            // FailureId is now nullable (int?) so config audits (which have
+            // no associated JobFailure) fit the same table. Cascade still
+            // fires when a JobFailure is deleted — but only for rows that
+            // actually reference one.
             e.HasOne(a => a.Failure)
                 .WithMany(j => j.AuditLogs)
                 .HasForeignKey(a => a.FailureId)
@@ -267,6 +353,8 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(r => r.ExpectedValue).HasMaxLength(500);
             e.Property(r => r.WatermarkColumn).HasMaxLength(200);
             e.Property(r => r.SourceIdColumn).HasMaxLength(200);
+            e.Property(r => r.FilePathColumn).HasMaxLength(100);
+            e.Property(r => r.InputPathPattern).HasMaxLength(500);
             e.Property(r => r.Severity).IsRequired().HasMaxLength(20).HasConversion<string>();
             e.Property(r => r.Description).HasMaxLength(500);
             e.Property(r => r.IsActive).HasDefaultValue(true);
@@ -325,6 +413,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(m => m.ScanTypeId).IsRequired().HasDefaultValue(1);
             e.Property(m => m.LogFolder).HasMaxLength(500);
             e.Property(m => m.SearchPatterns).HasMaxLength(500);
+            e.Property(m => m.InputFolder).HasMaxLength(500);
             e.Property(m => m.ConnectionName).HasMaxLength(200);
             e.Property(m => m.LogSourceUrl).HasMaxLength(500);
             e.Property(m => m.PollingIntervalSeconds).HasDefaultValue(300);

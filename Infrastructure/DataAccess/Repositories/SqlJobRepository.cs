@@ -84,6 +84,11 @@ public sealed class SqlJobRepository(IDbContextFactory<AiDbContext> factory) : I
             .Include(j => j.ErrorType)
             .Include(j => j.MonitoredJob);
 
+        // "fix-failed" window is today-midnight, matching the dashboard
+        // "Fix Failures Today" KPI it drills into. Captured once so the EF
+        // translation doesn't see DateTime.Today inside the Where expression.
+        var todayStart = DateTime.Today;
+
         query = (view ?? string.Empty).ToLowerInvariant() switch
         {
             "active"          => query.Where(j => j.Status == JobStatus.Failed),
@@ -95,6 +100,18 @@ public sealed class SqlJobRepository(IDbContextFactory<AiDbContext> factory) : I
                                     x.FailureId == j.FailureId && x.Success && x.TriggerType == TriggerType.AutoHeal)),
             "operator-fixed"  => query.Where(j => db.FixExecutionLogs.Any(x =>
                                     x.FailureId == j.FailureId && x.Success && x.TriggerType == TriggerType.OperatorApproved)),
+            // Failures the system tried to fix today and failed at — driven
+            // by the dashboard's "Fix Failures Today" KPI drill-down. Status
+            // is the durable signal (the executor flips JobStatus to
+            // ManualRequired on a failed fix); the FixExecutionLog window
+            // narrows to "today" so an old failure with a fresh failed log
+            // is also surfaced if it ran again today.
+            "fix-failed"      => query.Where(j =>
+                                    j.Status == JobStatus.ManualRequired
+                                 && db.FixExecutionLogs.Any(x =>
+                                        x.FailureId == j.FailureId
+                                     && !x.Success
+                                     && x.ExecutedAt >= todayStart)),
             _ => query, // null / "" / "all" / unknown → no filter
         };
 
@@ -103,5 +120,21 @@ public sealed class SqlJobRepository(IDbContextFactory<AiDbContext> factory) : I
         var total = await ordered.CountAsync(ct);
         var items = await ordered.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
         return new PagedResult<JobFailure>(items, total, page, pageSize);
+    }
+
+    public async Task<HashSet<int>> GetIdsWithRecentFixFailureAsync(
+        IReadOnlyCollection<int> failureIds, DateTime since, CancellationToken ct = default)
+    {
+        if (failureIds.Count == 0) return new HashSet<int>();
+
+        await using var db = await factory.CreateDbContextAsync(ct);
+        var hits = await db.FixExecutionLogs
+            .Where(x => failureIds.Contains(x.FailureId)
+                     && !x.Success
+                     && x.ExecutedAt >= since)
+            .Select(x => x.FailureId)
+            .Distinct()
+            .ToListAsync(ct);
+        return new HashSet<int>(hits);
     }
 }

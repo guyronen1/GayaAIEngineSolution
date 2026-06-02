@@ -8,6 +8,19 @@ public class FixPolicyRule
     public int JobTypeId { get; set; }
     public int ErrorTypeId { get; set; }
 
+    /// <summary>
+    /// Optional override scope. When NULL, the rule is a JobType-level default
+    /// that applies to every MonitoredJob of <see cref="JobTypeId"/>. When set,
+    /// the rule is a per-MonitoredJob override that takes precedence over the
+    /// default for that specific job.
+    ///
+    /// Lookup priority (see SqlFixPolicyRepository.GetForAsync):
+    ///   1. Override matching (MonitoredJobId, ErrorTypeId, Enabled=1)
+    ///   2. Default  matching (JobTypeId, ErrorTypeId, Enabled=1, MonitoredJobId IS NULL)
+    ///   3. DbFixCatalogue dictionary fallback (unchanged)
+    /// </summary>
+    public int? MonitoredJobId { get; set; }
+
     /// <summary>Human-readable description of the fix (shown to operators).</summary>
     public required string ActionToApply { get; set; }
 
@@ -32,6 +45,11 @@ public class FixPolicyRule
     /// </summary>
     public string? ActionPayload { get; set; }
 
-    public JobType? JobType { get; set; }
-    public ErrorType? ErrorType { get; set; }
+    public JobType?      JobType        { get; set; }
+    public ErrorType?    ErrorType      { get; set; }
+    public MonitoredJob? MonitoredJob   { get; set; }
+
+    /// <summary>Ordered steps for Composite rules. Empty for single-action rules.
+    /// Eager-loaded with OrderBy(StepOrder) by SqlFixPolicyRepository.</summary>
+    public ICollection<FixPolicyRuleStep> Steps { get; set; } = [];
 }

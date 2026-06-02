@@ -31,7 +31,12 @@ public sealed class GenerateSuggestionsUseCase(
                 continue;
             }
 
-            var entry = await catalogue.GetEntryAsync(result.ErrorTypeCode, result.JobTypeId, ct) ?? DefaultEntry;
+            // Pass MonitoredJobId so the catalogue picks a per-job override
+            // (when configured) instead of the JobType-level default. The
+            // resulting rec's frozen AutoFixAvailable snapshot reflects the
+            // policy that will actually execute, not the JobType fallback.
+            var entry = await catalogue.GetEntryAsync(
+                result.ErrorTypeCode, result.JobTypeId, result.MonitoredJobId, ct) ?? DefaultEntry;
 
             var recommendation = new AiRecommendation
             {

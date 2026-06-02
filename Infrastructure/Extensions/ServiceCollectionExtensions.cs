@@ -4,6 +4,7 @@ using MaiaAI.Infrastructure.DataAccess;
 using MaiaAI.Infrastructure.DataAccess.Repositories;
 using MaiaAI.Infrastructure.Fix;
 using MaiaAI.Infrastructure.Parsing;
+using MaiaAI.Infrastructure.Placeholders;
 using MaiaAI.Infrastructure.Scanning;
 using MaiaAI.Infrastructure.Workers;
 using Microsoft.EntityFrameworkCore;
@@ -56,12 +57,19 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IFixHandler, DbFixHandler>();
         services.AddScoped<IFixHandler, ManualFixHandler>();
 
+        // ── Placeholder substitution (used by every executor) ────────────────
+        services.AddScoped<IPlaceholderResolver, PlaceholderResolver>();
+
         // ── Fix action executors: one per FixActionType ──────────────────────
         services.AddScoped<IFixActionExecutor, ApiCallExecutor>();
         services.AddScoped<IFixActionExecutor, StoredProcedureExecutor>();
         services.AddScoped<IFixActionExecutor, ScriptExecutor>();
         services.AddScoped<IFixActionExecutor, SqlScriptExecutor>();
         services.AddScoped<IFixActionExecutor, ManualActionExecutor>();
+        services.AddScoped<IFixActionExecutor, CopyFileExecutor>();
+        // Composite is orchestrated inline by DefaultFixEngine — no separate
+        // executor class. Engine iterates policy.Steps, dispatches each step
+        // to its single-action executor, and writes per-step FixExecutionLog.
 
         // ── Parsing & I/O ────────────────────────────────────────────────────
         services.AddScoped<ILogParser, SimpleLogParser>();

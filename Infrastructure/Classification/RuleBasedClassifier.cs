@@ -45,13 +45,16 @@ public sealed class RuleBasedClassifier(
             {
                 return new ClassificationResult
                 {
-                    FailureId     = job.FailureId,
-                    JobId         = job.JobId,
-                    JobTypeId     = job.JobTypeId,
-                    ErrorTypeId   = rule.ErrorTypeId,
-                    ErrorTypeCode = rule.ErrorType?.Code ?? string.Empty,
-                    RawError      = match.Trim(),
-                    Confidence    = (double)rule.Confidence,
+                    FailureId       = job.FailureId,
+                    JobId           = job.JobId,
+                    JobTypeId       = job.JobTypeId,
+                    // Forward to downstream so the suggestion generator can
+                    // pick a per-job override over the default policy.
+                    MonitoredJobId  = job.MonitoredJobId,
+                    ErrorTypeId     = rule.ErrorTypeId,
+                    ErrorTypeCode   = rule.ErrorType?.Code ?? string.Empty,
+                    RawError        = match.Trim(),
+                    Confidence      = (double)rule.Confidence,
                 };
             }
         }

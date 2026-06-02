@@ -43,10 +43,33 @@ public class DataController(
         var hasRecommendation = f.Recommendations.Any();
         var isExecuted        = f.Recommendations.Any(r => r.IsExecuted);
 
-        var stage = f.Status == MaiaAI.Core.Enums.JobStatus.Resolved || isExecuted ? "Fixed"
-                  : hasRecommendation                                               ? "Recommended"
-                  : f.ErrorTypeId.HasValue                                          ? "Classified"
-                  :                                                                   "Failed";
+        // Stage pipeline. After "Recommended" there are two alternative
+        // intermediate states the operator can reach:
+        //   • AwaitingManualAction  → "Acknowledged" — operator approved a
+        //                              Manual fix; off-system work in progress
+        //   • ManualRequired        → "Manual" — operator rejected (or
+        //                              auto-heal failed) and the failure now
+        //                              needs operator's manual intervention
+        // Both end at "Fixed" once the operator hits Mark Resolved.
+        //
+        // Status checks come BEFORE the legacy isExecuted fallback — otherwise
+        // (a) the Acknowledged state would render as Fixed (IsExecuted is set
+        // true at acknowledge time to stop the drain re-processing), and
+        // (b) ManualRequired with a still-pending isExecuted=false rec would
+        // wrongly fall through to "Recommended". Status is authoritative.
+        var stage = f.Status == MaiaAI.Core.Enums.JobStatus.Resolved              ? "Fixed"
+                  : f.Status == MaiaAI.Core.Enums.JobStatus.AwaitingManualAction  ? "Acknowledged"
+                  : f.Status == MaiaAI.Core.Enums.JobStatus.ManualRequired        ? "Manual"
+                  : isExecuted                                                    ? "Fixed"
+                  : hasRecommendation                                             ? "Recommended"
+                  : f.ErrorTypeId.HasValue                                        ? "Classified"
+                  :                                                                 "Failed";
+
+        // Match the override-then-default lookup priority used by
+        // SqlFixPolicyRepository / SqlRecommendationRepository so the
+        // policyStepCount the operator sees here is the same one that would
+        // execute on approve. One small query per failure-detail load.
+        var policyInfo = await BuildPolicyInfoAsync(f, ct);
 
         return Ok(new
         {
@@ -69,8 +92,64 @@ public class DataController(
                 r.OperatorApproved,
                 r.IsExecuted,
                 r.RecommendedAt,
+                // Wire the live policy info — drives the rec card's composite
+                // badge + step-list lazy fetch on the drawer.
+                FixPolicyRuleId          = policyInfo.GetValueOrDefault(r.ErrorTypeId).RuleId,
+                PolicyIsAutoHealEligible = policyInfo.GetValueOrDefault(r.ErrorTypeId).AutoHeal,
+                PolicyStepCount          = policyInfo.GetValueOrDefault(r.ErrorTypeId).StepCount,
             }).ToList(),
         });
+    }
+
+    /// <summary>
+    /// One-shot lookup of "for each distinct ErrorTypeId on this failure's
+    /// recommendations, what enabled policy would execute right now" —
+    /// override (per-MonitoredJob) wins over default (per-JobType). Returns
+    /// (ruleId, autoHeal, stepCount) per ErrorTypeId; missing entries mean
+    /// no enabled policy matches.
+    /// </summary>
+    private async Task<Dictionary<int, (int? RuleId, bool? AutoHeal, int StepCount)>>
+        BuildPolicyInfoAsync(MaiaAI.Core.Entities.JobFailure failure, CancellationToken ct)
+    {
+        var errorTypeIds = failure.Recommendations
+            .Select(r => r.ErrorTypeId)
+            .Distinct()
+            .ToList();
+        if (errorTypeIds.Count == 0)
+            return new Dictionary<int, (int?, bool?, int)>();
+
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var monitoredJobId = failure.MonitoredJobId;
+        var jobTypeId      = failure.JobTypeId;
+
+        var candidates = await db.FixPolicyRules
+            .Where(p => p.Enabled && errorTypeIds.Contains(p.ErrorTypeId)
+                     && ((monitoredJobId != null && p.MonitoredJobId == monitoredJobId)
+                      || (p.MonitoredJobId == null && p.JobTypeId == jobTypeId)))
+            .Select(p => new {
+                p.RuleId, p.ErrorTypeId, p.MonitoredJobId,
+                p.IsAutoHealEligible,
+                p.ActionTimestamp,
+                StepCount = p.Steps.Count,
+            })
+            .ToListAsync(ct);
+
+        // For each ErrorTypeId pick the winning row: override (MonitoredJobId
+        // non-null) beats default (null), then newest ActionTimestamp as
+        // defensive tiebreaker. Mirrors SqlFixPolicyRepository.GetForAsync.
+        var result = new Dictionary<int, (int? RuleId, bool? AutoHeal, int StepCount)>();
+        foreach (var etid in errorTypeIds)
+        {
+            var winner = candidates
+                .Where(p => p.ErrorTypeId == etid)
+                .OrderByDescending(p => p.MonitoredJobId != null)
+                .ThenByDescending(p => p.ActionTimestamp)
+                .FirstOrDefault();
+            result[etid] = winner is null
+                ? (null, null, 0)
+                : (winner.RuleId, winner.IsAutoHealEligible, winner.StepCount);
+        }
+        return result;
     }
 
     [HttpGet("failures")]
@@ -81,7 +160,18 @@ public class DataController(
         CancellationToken   ct       = default)
     {
         var paged = await jobs.GetPagedAsync(page, pageSize, view, ct);
-        var dtos  = paged.Items.Select(JobFailureDto.From).ToList();
+
+        // Batch lookup: of the paged FailureIds, which ones have a Success=false
+        // FixExecutionLog row since today-midnight? Drives the "Failed to
+        // Execute" badge in the UI, independent of the active view filter
+        // (so operators see the marker even when browsing the All view).
+        var failureIds = paged.Items.Select(f => f.FailureId).ToList();
+        var withFixFailure = await jobs.GetIdsWithRecentFixFailureAsync(
+            failureIds, DateTime.Today, ct);
+
+        var dtos = paged.Items
+            .Select(f => JobFailureDto.From(f, withFixFailure.Contains(f.FailureId)))
+            .ToList();
         return Ok(new { paged.TotalCount, paged.TotalPages, paged.Page, paged.PageSize, Items = dtos });
     }
 
@@ -330,6 +420,135 @@ public class DataController(
     }
 
     /// <summary>
+    /// Top-N monitored jobs by failure count within the chosen range. Shares the
+    /// 24h/7d/30d toggle with the Errors Over Time chart so a single operator
+    /// gesture updates both row-1 charts. Filters out orphan failures with
+    /// MonitoredJobId IS NULL — the chart is "top named jobs", not a mixed view.
+    /// Tie-break alphabetical for stable UI ordering across renders.
+    /// </summary>
+    [HttpGet("analytics/failures-by-job")]
+    public async Task<IActionResult> GetFailuresByJob(
+        [FromQuery] string range = "24h",
+        [FromQuery] int    limit = 10,
+        CancellationToken  ct    = default)
+    {
+        // Clamp limit so an accidental ?limit=10000 doesn't blow the response.
+        if (limit < 1)   limit = 1;
+        if (limit > 50)  limit = 50;
+
+        var nowLocal = DateTime.Now;
+        DateTime start = (range ?? "24h").ToLowerInvariant() switch
+        {
+            "7d"  => nowLocal.AddDays(-7),
+            "30d" => nowLocal.AddDays(-30),
+            _     => nowLocal.AddHours(-24),
+        };
+
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+
+        // GroupBy MonitoredJobId then join MonitoredJob for display name.
+        // Filter MonitoredJobId IS NOT NULL — top-10 lists named jobs only.
+        var rows = await db.JobFailures
+            .Where(f => f.DetectedAt >= start && f.MonitoredJobId != null)
+            .GroupBy(f => f.MonitoredJobId!.Value)
+            .Select(g => new { monitoredJobId = g.Key, failureCount = g.Count() })
+            .ToListAsync(ct);
+
+        var ids   = rows.Select(r => r.monitoredJobId).ToList();
+        var jobs  = await db.MonitoredJobs
+            .Where(j => ids.Contains(j.MonitoredJobId))
+            .ToDictionaryAsync(j => j.MonitoredJobId, j => new { j.Name, j.DisplayName }, ct);
+
+        var result = rows
+            .Select(r =>
+            {
+                jobs.TryGetValue(r.monitoredJobId, out var j);
+                return new
+                {
+                    monitoredJobId = r.monitoredJobId,
+                    jobName        = j?.DisplayName ?? j?.Name ?? $"Job {r.monitoredJobId}",
+                    failureCount   = r.failureCount,
+                };
+            })
+            .OrderByDescending(r => r.failureCount)
+            .ThenBy(r => r.jobName, StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .ToList();
+
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// 7-day stacked-resolution-mix breakdown bucketed by JobFailure.DetectedAt.
+    /// Single timestamp source for all four stacks keeps the semantic clear:
+    /// "of failures detected on day X, here's the outcome composition".
+    /// Today's bar honestly includes in-progress failures via the stillActive
+    /// stack. Range param exists for future flexibility but only "7d" is wired.
+    /// </summary>
+    [HttpGet("analytics/resolution-mix")]
+    public async Task<IActionResult> GetResolutionMix(
+        [FromQuery] string range = "7d",
+        CancellationToken  ct    = default)
+    {
+        // Range param accepted for future flexibility, but only 7d is wired now.
+        if (range != "7d") range = "7d";
+
+        // 7 days inclusive of today, server-local midnight boundaries.
+        var todayStart = DateTime.Today;
+        var windowStart = todayStart.AddDays(-6);
+        var windowEnd   = todayStart.AddDays(1);   // exclusive upper bound
+
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+
+        // Per-failure classification: project the AutoHeal / Operator flags
+        // into a flat per-failure row, then group + count in memory. We can't
+        // express `.Count(f => db.FixExecutionLogs.Any(...))` inside `.GroupBy`
+        // — SQL Server rejects "aggregate over subquery". Per-row .Any() in
+        // the SELECT translates to correlated subqueries (fine), and the
+        // 7-day window keeps the in-memory grouping cheap.
+        //
+        // Caveat (inherited from dashboard-stats): a failure with BOTH a
+        // successful AutoHeal log and a successful OperatorApproved log would
+        // be counted in both columns. Idempotent suggestion generation makes
+        // this rare in practice; documenting for parity with that endpoint.
+        var raw = await db.JobFailures
+            .Where(f => f.DetectedAt >= windowStart && f.DetectedAt < windowEnd)
+            .Select(f => new
+            {
+                Day         = new DateTime(f.DetectedAt.Year, f.DetectedAt.Month, f.DetectedAt.Day),
+                f.Status,
+                HasAutoHeal = db.FixExecutionLogs.Any(x =>
+                    x.FailureId == f.FailureId && x.Success && x.TriggerType == TriggerType.AutoHeal),
+                HasOperator = db.FixExecutionLogs.Any(x =>
+                    x.FailureId == f.FailureId && x.Success && x.TriggerType == TriggerType.OperatorApproved),
+            })
+            .ToListAsync(ct);
+
+        var grouped = raw
+            .GroupBy(f => f.Day)
+            .ToDictionary(g => g.Key, g => new
+            {
+                autoHealed       = g.Count(f => f.HasAutoHeal),
+                operatorApproved = g.Count(f => f.HasOperator),
+                manualRequired   = g.Count(f => f.Status == JobStatus.ManualRequired),
+                // "Still Active" uses the same predicate as the Active Failures
+                // KPI on the dashboard (Status=Failed) so the two surfaces agree.
+                stillActive      = g.Count(f => f.Status == JobStatus.Failed),
+            });
+
+        // Gap-fill: always return 7 rows, oldest first, so the chart can render
+        // a 7-bar row even when some days had zero failures detected.
+        var result = Enumerable.Range(0, 7)
+            .Select(offset => windowStart.AddDays(offset))
+            .Select(d => grouped.TryGetValue(d, out var r)
+                ? new { bucketDay = d.ToString("yyyy-MM-dd"), r.autoHealed, r.operatorApproved, r.manualRequired, r.stillActive }
+                : new { bucketDay = d.ToString("yyyy-MM-dd"), autoHealed = 0, operatorApproved = 0, manualRequired = 0, stillActive = 0 })
+            .ToList();
+
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Aggregate counts for the dashboard. DB-level — does not depend on paging.
     /// <c>autoFixed</c> counts distinct failures with a successful auto-heal execution log;
     /// <c>manuallyFixed</c> counts distinct failures resolved via operator approval.
@@ -369,6 +588,20 @@ public class DataController(
             .CountAsync(f => db.FixExecutionLogs.Any(x =>
                 x.FailureId == f.FailureId && x.Success && x.TriggerType == TriggerType.OperatorApproved), ct);
 
+        // Fix Failures Today — distinct failures currently in ManualRequired
+        // that had at least one Success=false FixExecutionLog since today-
+        // midnight. Matches the `view=fix-failed` drill-down filter exactly
+        // so the KPI count and the drill-down list always agree. Note: a
+        // single failure with three failed step logs counts as 1 here
+        // (Distinct/Any), not 3 — matches operator's mental model.
+        var fixFailedToday = await db.JobFailures
+            .Where(f => f.Status == JobStatus.ManualRequired
+                     && db.FixExecutionLogs.Any(x =>
+                            x.FailureId == f.FailureId
+                         && !x.Success
+                         && x.ExecutedAt >= todayStart))
+            .CountAsync(ct);
+
         return Ok(new
         {
             totalFailures,
@@ -382,6 +615,7 @@ public class DataController(
             resolvedToday,
             autoFixedToday,
             manuallyFixedToday,
+            fixFailedToday,
         });
     }
 

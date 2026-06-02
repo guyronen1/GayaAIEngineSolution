@@ -1,7 +1,18 @@
 ﻿using AIEngineAPI.Extensions;
 using MaiaAI.Infrastructure.Extensions;
+using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// ── Logging: Serilog (replaces the default Console+Debug providers) ────────
+// Config lives in appsettings.json under "Serilog" — both sinks (console
+// for `dotnet run` visibility + rolling daily file at logs/maia-api-.log
+// with 30-day retention) are declarative there, so ops can swap rolling
+// policy or add a network sink without a rebuild.
+builder.Host.UseSerilog((ctx, services, cfg) =>
+    cfg.ReadFrom.Configuration(ctx.Configuration)
+       .ReadFrom.Services(services)
+       .Enrich.FromLogContext());
 
 builder.Services.AddCors(options =>
 {

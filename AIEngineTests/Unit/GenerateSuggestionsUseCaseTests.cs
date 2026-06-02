@@ -43,7 +43,7 @@ public class GenerateSuggestionsUseCaseTests
         string errorCode, FixCategory expectedCategory, bool expectedAutoHeal)
     {
         _catalogueMock
-            .Setup(c => c.GetEntryAsync(errorCode, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Setup(c => c.GetEntryAsync(errorCode, It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FixCatalogueEntry("Fix it.", expectedCategory, 0.0, expectedAutoHeal));
 
         AiRecommendation? saved = null;
@@ -63,7 +63,7 @@ public class GenerateSuggestionsUseCaseTests
     public async Task GenerateSuggestions_SavesOneRecommendationPerResult()
     {
         _catalogueMock
-            .Setup(c => c.GetEntryAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Setup(c => c.GetEntryAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FixCatalogueEntry("Fix.", FixCategory.Retry, 0.0, true));
 
         var results = new[]
@@ -93,7 +93,7 @@ public class GenerateSuggestionsUseCaseTests
     public async Task GenerateSuggestions_ConfidenceIsClampedBetweenZeroAndOne()
     {
         _catalogueMock
-            .Setup(c => c.GetEntryAsync("Transform", It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Setup(c => c.GetEntryAsync("Transform", It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FixCatalogueEntry("Inspect.", FixCategory.Manual, -0.1, false));
 
         AiRecommendation? saved = null;

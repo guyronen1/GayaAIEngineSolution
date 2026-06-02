@@ -37,6 +37,13 @@ public class MonitoredJob
     /// <summary>Comma-separated glob patterns, e.g. "Trap*.log,Trap*.txt".</summary>
     public string? SearchPatterns { get; set; }
 
+    /// <summary>Optional base folder for input file paths captured via a rule's
+    /// InputPathPattern when the regex capture is a relative filename. Absolute
+    /// captures (Path.IsPathRooted) ignore this. Used by FileSystemScanStrategy
+    /// to materialise JobFailure.SourceFilePath; distinct from LogFolder which
+    /// is where the log files themselves live.</summary>
+    public string? InputFolder { get; set; }
+
     // ── Database scan config ──────────────────────────────────────────────────
     /// <summary>Named connection string key in appsettings (resolves at runtime).</summary>
     public string? ConnectionName { get; set; }

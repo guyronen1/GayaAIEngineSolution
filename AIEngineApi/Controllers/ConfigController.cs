@@ -8,13 +8,207 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AIEngineAPI.Controllers;
 
+/// <summary>
+/// Configuration CRUD with audit. Every successful POST/PUT/DELETE writes
+/// an AuditLog row (EntityType + EntityId discriminator, EventType =
+/// "{EntityType}{ActionVerb}" e.g. "FixPolicyUpdated"). Audit-write failures
+/// log at Error level but never fail the request — the operator's config
+/// change already succeeded by then; degraded audit beats a rolled-back UX.
+///
+/// OperatorId is required on every write and rides in the request body
+/// (POST/PUT) or query string (DELETE). Frontend passes "operator" as a
+/// constant for now; when auth lands, it'll switch to the authenticated
+/// identity in one sweep.
+/// </summary>
 [ApiController]
 [Route("api/[controller]")]
 public class ConfigController(
     IMonitoredJobRepository        jobRepo,
     IClassificationRuleRepository  ruleRepo,
+    IAuditRepository               audit,
+    ILogger<ConfigController>      logger,
     IDbContextFactory<AiDbContext> dbFactory) : ControllerBase
 {
+    // ── Audit helpers ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Write an AuditLog row. Never throws — failures are logged so they
+    /// surface in ops monitoring but don't fail the request that already
+    /// succeeded. If audit-write reliability becomes a concern, an outbox
+    /// pattern fits cleanly on top of this.
+    /// </summary>
+    private async Task WriteAuditAsync(
+        string entityType, string entityId, string eventType,
+        string actor, string detail, CancellationToken ct)
+    {
+        try
+        {
+            await audit.WriteAsync(new AuditLog
+            {
+                EntityType = entityType,
+                EntityId   = entityId,
+                EventType  = eventType,
+                Actor      = actor,
+                Detail     = detail,
+                Timestamp  = DateTime.Now,
+            }, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "Audit write failed: EventType={EventType} EntityType={EntityType} EntityId={EntityId}",
+                eventType, entityType, entityId);
+        }
+    }
+
+    /// <summary>
+    /// Build the Detail string for an Updated event: "Field: before → after"
+    /// joined by ", ", with only the fields that actually changed included.
+    /// Returns empty string when nothing changed — caller decides whether
+    /// to skip the audit write or emit a "No changes" placeholder.
+    /// </summary>
+    private static string BuildDiff(params (string field, object? before, object? after)[] changes)
+    {
+        var changed = changes
+            .Where(c => !Equals(c.before, c.after))
+            .Select(c => $"{c.field}: {FormatValue(c.before)} → {FormatValue(c.after)}");
+        return string.Join(", ", changed);
+    }
+
+    /// <summary>Render a value for the audit Detail string. Strings get single
+    /// quotes, bools lowercase (matches JSON convention), null → "null".</summary>
+    private static string FormatValue(object? v) => v switch
+    {
+        null     => "null",
+        string s => $"'{s}'",
+        bool b   => b ? "true" : "false",
+        _        => v.ToString() ?? "null",
+    };
+
+    /// <summary>Reject the request when OperatorId wasn't supplied — every
+    /// write needs an actor for the audit row to be useful.</summary>
+    private bool MissingOperator(string? operatorId, out IActionResult error)
+    {
+        if (string.IsNullOrWhiteSpace(operatorId))
+        {
+            error = BadRequest(new { Message = "operatorId is required." });
+            return true;
+        }
+        error = null!;
+        return false;
+    }
+
+    /// <summary>
+    /// Validates the composite/step shape of a FixPolicyRule upsert request.
+    /// Returns true (with a populated <paramref name="error"/>) when the
+    /// request is invalid — caller short-circuits with that response. Returns
+    /// false (with a populated <paramref name="normalisedSteps"/>) when the
+    /// request is valid; <paramref name="normalisedSteps"/> is non-empty for
+    /// composite and empty/null for single-action.
+    ///
+    /// The eight rules enforced (in order):
+    ///   1. Composite must have at least one step
+    ///   2. Composite must not have a header ActionPayload
+    ///   3. Non-composite must not have steps
+    ///   4. No nested composite (steps cannot themselves be Composite)
+    ///   5. No Manual steps (composite is automated by definition)
+    ///   6. Unknown step ActionType
+    ///   7. Duplicate StepOrder
+    ///   8. Empty step ActionPayload
+    /// </summary>
+    private bool ValidateCompositePayload(
+        UpsertFixPolicyRuleRequest req,
+        FixActionType              actionType,
+        out IActionResult          error,
+        out List<NormalisedStep>?  normalisedSteps)
+    {
+        var hasSteps = req.Steps is { Count: > 0 };
+
+        if (actionType == FixActionType.Composite && !hasSteps)
+        {
+            error = BadRequest(new { error = "CompositeRequiresSteps", message = "Composite policies require at least one step." });
+            normalisedSteps = null; return true;
+        }
+
+        if (actionType == FixActionType.Composite && !string.IsNullOrWhiteSpace(req.ActionPayload))
+        {
+            error = BadRequest(new { error = "CompositePayloadConflict", message = "Composite policies must not set ActionPayload; payload belongs on each step." });
+            normalisedSteps = null; return true;
+        }
+
+        if (actionType != FixActionType.Composite && hasSteps)
+        {
+            error = BadRequest(new { error = "NonCompositeWithSteps", message = "Only Composite policies can have steps. Set ActionType=Composite." });
+            normalisedSteps = null; return true;
+        }
+
+        if (!hasSteps)
+        {
+            // Single-action policy — no further validation.
+            error = null!; normalisedSteps = null; return false;
+        }
+
+        var seenOrders = new HashSet<int>();
+        var parsed = new List<NormalisedStep>(req.Steps!.Count);
+        foreach (var s in req.Steps!)
+        {
+            if (!Enum.TryParse<FixActionType>(s.ActionType, out var stepActionType))
+            {
+                error = BadRequest(new { error = "UnknownStepActionType", message = $"Step at order {s.StepOrder} has unsupported ActionType '{s.ActionType}'." });
+                normalisedSteps = null; return true;
+            }
+            if (stepActionType == FixActionType.Composite)
+            {
+                error = BadRequest(new { error = "NestedCompositeForbidden", message = $"Step at order {s.StepOrder} cannot itself be Composite." });
+                normalisedSteps = null; return true;
+            }
+            if (stepActionType == FixActionType.Manual)
+            {
+                error = BadRequest(new { error = "ManualStepForbidden", message = $"Step at order {s.StepOrder} cannot be Manual. A composite is by definition automated." });
+                normalisedSteps = null; return true;
+            }
+            if (string.IsNullOrWhiteSpace(s.ActionPayload))
+            {
+                error = BadRequest(new { error = "StepPayloadRequired", message = $"Step at order {s.StepOrder} has no payload." });
+                normalisedSteps = null; return true;
+            }
+            if (!seenOrders.Add(s.StepOrder))
+            {
+                error = BadRequest(new { error = "DuplicateStepOrder", message = $"Step orders must be unique within a policy (duplicate: {s.StepOrder})." });
+                normalisedSteps = null; return true;
+            }
+            parsed.Add(new NormalisedStep(s.StepOrder, stepActionType, s.ActionPayload, s.Description));
+        }
+
+        // Renormalise orders to 1..N regardless of input — spares the UI from
+        // having to re-pack after deletes. Sort by input StepOrder ascending
+        // to preserve the operator's intended sequence.
+        var packed = parsed
+            .OrderBy(p => p.StepOrder)
+            .Select((p, i) => p with { StepOrder = i + 1 })
+            .ToList();
+
+        error = null!; normalisedSteps = packed; return false;
+    }
+
+    /// <summary>Compact one-line summary of a step list for audit diff text.
+    /// Order matters for diff legibility: a reorder shows clearly here.</summary>
+    private static string SummariseSteps(IEnumerable<FixPolicyRuleStep> steps)
+    {
+        var ordered = steps.OrderBy(s => s.StepOrder).ToList();
+        return ordered.Count == 0
+            ? "(none)"
+            : string.Join(" → ", ordered.Select(s => $"{s.StepOrder}:{s.ActionType}"));
+    }
+
+    /// <summary>Internal validated-step shape — keeps ValidateCompositePayload's
+    /// output strongly-typed (vs reusing the DTO which has a string ActionType).</summary>
+    public sealed record NormalisedStep(
+        int           StepOrder,
+        FixActionType ActionType,
+        string        ActionPayload,
+        string?       Description);
+
     // ── Lookup data ──────────────────────────────────────────────────────────
 
     [HttpGet("job-types")]
@@ -44,6 +238,7 @@ public class ConfigController(
     [HttpPost("error-types")]
     public async Task<IActionResult> CreateErrorType([FromBody] UpsertErrorTypeRequest req, CancellationToken ct)
     {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
         if (string.IsNullOrWhiteSpace(req.Code))        return BadRequest(new { Message = "Code is required." });
         if (string.IsNullOrWhiteSpace(req.DisplayName)) return BadRequest(new { Message = "DisplayName is required." });
         if (!Enum.TryParse<Severity>(req.Severity, ignoreCase: true, out var severity))
@@ -63,12 +258,22 @@ public class ConfigController(
         };
         db.ErrorTypes.Add(et);
         await db.SaveChangesAsync(ct);
+
+        await WriteAuditAsync(
+            entityType: "ErrorType",
+            entityId:   et.ErrorTypeId.ToString(),
+            eventType:  "ErrorTypeCreated",
+            actor:      req.OperatorId,
+            detail:     $"Created ErrorType '{et.Code}' (DisplayName='{et.DisplayName}', Severity={et.Severity}, IsActive={FormatValue(et.IsActive)})",
+            ct: ct);
+
         return Ok(new { et.ErrorTypeId });
     }
 
     [HttpPut("error-types/{id:int}")]
     public async Task<IActionResult> UpdateErrorType(int id, [FromBody] UpsertErrorTypeRequest req, CancellationToken ct)
     {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
         if (!Enum.TryParse<Severity>(req.Severity, ignoreCase: true, out var severity))
             return BadRequest(new { Message = $"Unknown Severity '{req.Severity}'. Expected: Low, Medium, High, Critical." });
 
@@ -81,18 +286,45 @@ public class ConfigController(
             && await db.ErrorTypes.AnyAsync(t => t.Code == req.Code && t.ErrorTypeId != id, ct))
             return Conflict(new { Message = $"ErrorType with Code '{req.Code}' already exists." });
 
+        // Snapshot original values BEFORE mutation so the audit diff sees
+        // the actual before/after — EF Core's tracked entity is about to
+        // be overwritten in place.
+        var beforeCode        = et.Code;
+        var beforeDisplayName = et.DisplayName;
+        var beforeDescription = et.Description;
+        var beforeSeverity    = et.Severity;
+        var beforeIsActive    = et.IsActive;
+
         et.Code        = req.Code;
         et.DisplayName = req.DisplayName;
         et.Description = req.Description;
         et.Severity    = severity;
         et.IsActive    = req.IsActive;
         await db.SaveChangesAsync(ct);
+
+        var diff = BuildDiff(
+            ("Code",        beforeCode,        et.Code),
+            ("DisplayName", beforeDisplayName, et.DisplayName),
+            ("Description", beforeDescription, et.Description),
+            ("Severity",    beforeSeverity,    et.Severity),
+            ("IsActive",    beforeIsActive,    et.IsActive));
+        await WriteAuditAsync(
+            entityType: "ErrorType",
+            entityId:   id.ToString(),
+            eventType:  "ErrorTypeUpdated",
+            actor:      req.OperatorId,
+            detail:     diff.Length > 0 ? diff : "No changes",
+            ct: ct);
+
         return NoContent();
     }
 
     [HttpDelete("error-types/{id:int}")]
-    public async Task<IActionResult> DeleteErrorType(int id, CancellationToken ct)
+    public async Task<IActionResult> DeleteErrorType(
+        int id, [FromQuery] string operatorId, CancellationToken ct)
     {
+        if (MissingOperator(operatorId, out var opErr)) return opErr;
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var et = await db.ErrorTypes.FindAsync([id], ct);
         if (et is null) return NotFound();
@@ -101,6 +333,15 @@ public class ConfigController(
         // with RESTRICT FKs. A hard DELETE would fail; flipping IsActive is the right primitive.
         et.IsActive = false;
         await db.SaveChangesAsync(ct);
+
+        await WriteAuditAsync(
+            entityType: "ErrorType",
+            entityId:   id.ToString(),
+            eventType:  "ErrorTypeDeleted",
+            actor:      operatorId,
+            detail:     $"Soft-deleted ErrorType {id} ('{et.Code}', DisplayName='{et.DisplayName}')",
+            ct: ct);
+
         return NoContent();
     }
 
@@ -116,6 +357,8 @@ public class ConfigController(
     [HttpPost("monitored-jobs")]
     public async Task<IActionResult> CreateJob([FromBody] UpsertMonitoredJobRequest req, CancellationToken ct)
     {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
         var job = new MonitoredJob
         {
             Name                   = req.Name,
@@ -124,6 +367,7 @@ public class ConfigController(
             ScanTypeId             = req.ScanTypeId,
             LogFolder              = req.LogFolder,
             SearchPatterns         = req.SearchPatterns,
+            InputFolder            = req.InputFolder,
             ConnectionName         = req.ConnectionName,
             LogSourceUrl           = req.LogSourceUrl,
             PollingIntervalSeconds = req.PollingIntervalSeconds,
@@ -132,14 +376,39 @@ public class ConfigController(
             CreatedAt              = DateTime.Now,
         };
         var saved = await jobRepo.SaveAsync(job, ct);
+
+        await WriteAuditAsync(
+            entityType: "MonitoredJob",
+            entityId:   saved.MonitoredJobId.ToString(),
+            eventType:  "MonitoredJobCreated",
+            actor:      req.OperatorId,
+            detail:     $"Created MonitoredJob '{saved.Name}' (JobTypeId={saved.JobTypeId}, ScanTypeId={saved.ScanTypeId}, PollingIntervalSeconds={saved.PollingIntervalSeconds}, IsActive={FormatValue(saved.IsActive)})",
+            ct: ct);
+
         return Ok(new { saved.MonitoredJobId });
     }
 
     [HttpPut("monitored-jobs/{id:int}")]
     public async Task<IActionResult> UpdateJob(int id, [FromBody] UpsertMonitoredJobRequest req, CancellationToken ct)
     {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
         var job = await jobRepo.GetByIdAsync(id, ct);
         if (job is null) return NotFound();
+
+        // Snapshot before mutation for the audit diff.
+        var beforeName           = job.Name;
+        var beforeDisplayName    = job.DisplayName;
+        var beforeJobTypeId      = job.JobTypeId;
+        var beforeScanTypeId     = job.ScanTypeId;
+        var beforeLogFolder      = job.LogFolder;
+        var beforeSearchPatterns = job.SearchPatterns;
+        var beforeInputFolder    = job.InputFolder;
+        var beforeConnectionName = job.ConnectionName;
+        var beforeLogSourceUrl   = job.LogSourceUrl;
+        var beforePollingInterval= job.PollingIntervalSeconds;
+        var beforeIsActive       = job.IsActive;
+        var beforeDescription    = job.Description;
 
         job.Name                   = req.Name;
         job.DisplayName            = req.DisplayName;
@@ -147,6 +416,7 @@ public class ConfigController(
         job.ScanTypeId             = req.ScanTypeId;
         job.LogFolder              = req.LogFolder;
         job.SearchPatterns         = req.SearchPatterns;
+        job.InputFolder            = req.InputFolder;
         job.ConnectionName         = req.ConnectionName;
         job.LogSourceUrl           = req.LogSourceUrl;
         job.PollingIntervalSeconds = req.PollingIntervalSeconds;
@@ -154,13 +424,52 @@ public class ConfigController(
         job.Description            = req.Description;
 
         await jobRepo.UpdateAsync(job, ct);
+
+        var diff = BuildDiff(
+            ("Name",                   beforeName,            job.Name),
+            ("DisplayName",            beforeDisplayName,     job.DisplayName),
+            ("JobTypeId",              beforeJobTypeId,       job.JobTypeId),
+            ("ScanTypeId",             beforeScanTypeId,      job.ScanTypeId),
+            ("LogFolder",              beforeLogFolder,       job.LogFolder),
+            ("SearchPatterns",         beforeSearchPatterns,  job.SearchPatterns),
+            ("InputFolder",            beforeInputFolder,     job.InputFolder),
+            ("ConnectionName",         beforeConnectionName,  job.ConnectionName),
+            ("LogSourceUrl",           beforeLogSourceUrl,    job.LogSourceUrl),
+            ("PollingIntervalSeconds", beforePollingInterval, job.PollingIntervalSeconds),
+            ("IsActive",               beforeIsActive,        job.IsActive),
+            ("Description",            beforeDescription,     job.Description));
+        await WriteAuditAsync(
+            entityType: "MonitoredJob",
+            entityId:   id.ToString(),
+            eventType:  "MonitoredJobUpdated",
+            actor:      req.OperatorId,
+            detail:     diff.Length > 0 ? diff : "No changes",
+            ct: ct);
+
         return NoContent();
     }
 
     [HttpDelete("monitored-jobs/{id:int}")]
-    public async Task<IActionResult> DeleteJob(int id, CancellationToken ct)
+    public async Task<IActionResult> DeleteJob(
+        int id, [FromQuery] string operatorId, CancellationToken ct)
     {
+        if (MissingOperator(operatorId, out var opErr)) return opErr;
+
+        // Snapshot name for the audit row before the entity is gone.
+        var job = await jobRepo.GetByIdAsync(id, ct);
+        if (job is null) return NotFound();
+        var jobName = job.Name;
+
         await jobRepo.DeleteAsync(id, ct);
+
+        await WriteAuditAsync(
+            entityType: "MonitoredJob",
+            entityId:   id.ToString(),
+            eventType:  "MonitoredJobDeleted",
+            actor:      operatorId,
+            detail:     $"Deleted MonitoredJob {id} ('{jobName}')",
+            ct: ct);
+
         return NoContent();
     }
 
@@ -169,58 +478,127 @@ public class ConfigController(
     [HttpPost("monitored-jobs/{jobId:int}/scan-rules")]
     public async Task<IActionResult> CreateScanRule(int jobId, [FromBody] UpsertScanCheckRuleRequest req, CancellationToken ct)
     {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = new ScanCheckRule
         {
-            MonitoredJobId  = jobId,
-            CheckType       = Enum.Parse<CheckType>(req.CheckType),
-            SourceTable     = req.SourceTable,
-            TargetField     = req.TargetField,
-            MinValue        = req.MinValue,
-            MaxValue        = req.MaxValue,
-            ExpectedValue   = req.ExpectedValue,
-            WatermarkColumn = req.WatermarkColumn,
-            SourceIdColumn  = req.SourceIdColumn,
-            Severity        = Enum.Parse<Severity>(req.Severity),
-            Description     = req.Description,
-            IsActive        = true,
+            MonitoredJobId   = jobId,
+            CheckType        = Enum.Parse<CheckType>(req.CheckType),
+            SourceTable      = req.SourceTable,
+            TargetField      = req.TargetField,
+            MinValue         = req.MinValue,
+            MaxValue         = req.MaxValue,
+            ExpectedValue    = req.ExpectedValue,
+            WatermarkColumn  = req.WatermarkColumn,
+            SourceIdColumn   = req.SourceIdColumn,
+            FilePathColumn   = req.FilePathColumn,
+            InputPathPattern = req.InputPathPattern,
+            Severity         = Enum.Parse<Severity>(req.Severity),
+            Description      = req.Description,
+            IsActive         = true,
         };
         db.ScanCheckRules.Add(rule);
         await db.SaveChangesAsync(ct);
+
+        await WriteAuditAsync(
+            entityType: "ScanCheckRule",
+            entityId:   rule.CheckRuleId.ToString(),
+            eventType:  "ScanRuleCreated",
+            actor:      req.OperatorId,
+            detail:     $"Created ScanCheckRule for MonitoredJob {jobId} (CheckType={rule.CheckType}, TargetField='{rule.TargetField}', Severity={rule.Severity})",
+            ct: ct);
+
         return Ok(new { rule.CheckRuleId });
     }
 
     [HttpPut("scan-rules/{id:int}")]
     public async Task<IActionResult> UpdateScanRule(int id, [FromBody] UpsertScanCheckRuleRequest req, CancellationToken ct)
     {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = await db.ScanCheckRules.FindAsync([id], ct);
         if (rule is null) return NotFound();
 
-        rule.CheckType       = Enum.Parse<CheckType>(req.CheckType);
-        rule.SourceTable     = req.SourceTable;
-        rule.TargetField     = req.TargetField;
-        rule.MinValue        = req.MinValue;
-        rule.MaxValue        = req.MaxValue;
-        rule.ExpectedValue   = req.ExpectedValue;
-        rule.WatermarkColumn = req.WatermarkColumn;
-        rule.SourceIdColumn  = req.SourceIdColumn;
-        rule.Severity        = Enum.Parse<Severity>(req.Severity);
-        rule.Description     = req.Description;
-        rule.IsActive        = req.IsActive;
+        var beforeCheckType        = rule.CheckType;
+        var beforeSourceTable      = rule.SourceTable;
+        var beforeTargetField      = rule.TargetField;
+        var beforeMinValue         = rule.MinValue;
+        var beforeMaxValue         = rule.MaxValue;
+        var beforeExpected         = rule.ExpectedValue;
+        var beforeWatermark        = rule.WatermarkColumn;
+        var beforeSourceId         = rule.SourceIdColumn;
+        var beforeFilePathColumn   = rule.FilePathColumn;
+        var beforeInputPathPattern = rule.InputPathPattern;
+        var beforeSeverity         = rule.Severity;
+        var beforeDescription      = rule.Description;
+        var beforeIsActive         = rule.IsActive;
+
+        rule.CheckType        = Enum.Parse<CheckType>(req.CheckType);
+        rule.SourceTable      = req.SourceTable;
+        rule.TargetField      = req.TargetField;
+        rule.MinValue         = req.MinValue;
+        rule.MaxValue         = req.MaxValue;
+        rule.ExpectedValue    = req.ExpectedValue;
+        rule.WatermarkColumn  = req.WatermarkColumn;
+        rule.SourceIdColumn   = req.SourceIdColumn;
+        rule.FilePathColumn   = req.FilePathColumn;
+        rule.InputPathPattern = req.InputPathPattern;
+        rule.Severity         = Enum.Parse<Severity>(req.Severity);
+        rule.Description      = req.Description;
+        rule.IsActive         = req.IsActive;
 
         await db.SaveChangesAsync(ct);
+
+        var diff = BuildDiff(
+            ("CheckType",        beforeCheckType,        rule.CheckType),
+            ("SourceTable",      beforeSourceTable,      rule.SourceTable),
+            ("TargetField",      beforeTargetField,      rule.TargetField),
+            ("MinValue",         beforeMinValue,         rule.MinValue),
+            ("MaxValue",         beforeMaxValue,         rule.MaxValue),
+            ("ExpectedValue",    beforeExpected,         rule.ExpectedValue),
+            ("WatermarkColumn",  beforeWatermark,        rule.WatermarkColumn),
+            ("SourceIdColumn",   beforeSourceId,         rule.SourceIdColumn),
+            ("FilePathColumn",   beforeFilePathColumn,   rule.FilePathColumn),
+            ("InputPathPattern", beforeInputPathPattern, rule.InputPathPattern),
+            ("Severity",         beforeSeverity,         rule.Severity),
+            ("Description",      beforeDescription,      rule.Description),
+            ("IsActive",         beforeIsActive,         rule.IsActive));
+        await WriteAuditAsync(
+            entityType: "ScanCheckRule",
+            entityId:   id.ToString(),
+            eventType:  "ScanRuleUpdated",
+            actor:      req.OperatorId,
+            detail:     diff.Length > 0 ? diff : "No changes",
+            ct: ct);
+
         return NoContent();
     }
 
     [HttpDelete("scan-rules/{id:int}")]
-    public async Task<IActionResult> DeleteScanRule(int id, CancellationToken ct)
+    public async Task<IActionResult> DeleteScanRule(
+        int id, [FromQuery] string operatorId, CancellationToken ct)
     {
+        if (MissingOperator(operatorId, out var opErr)) return opErr;
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = await db.ScanCheckRules.FindAsync([id], ct);
         if (rule is null) return NotFound();
+        var ruleJobId       = rule.MonitoredJobId;
+        var ruleCheckType   = rule.CheckType;
+        var ruleTargetField = rule.TargetField;
         rule.IsActive = false;
         await db.SaveChangesAsync(ct);
+
+        await WriteAuditAsync(
+            entityType: "ScanCheckRule",
+            entityId:   id.ToString(),
+            eventType:  "ScanRuleDeleted",
+            actor:      operatorId,
+            detail:     $"Soft-deleted ScanCheckRule {id} (MonitoredJob {ruleJobId}, {ruleCheckType} on '{ruleTargetField}')",
+            ct: ct);
+
         return NoContent();
     }
 
@@ -230,6 +608,8 @@ public class ConfigController(
     public async Task<IActionResult> CreateJobClassificationRule(
         int jobId, [FromBody] UpsertJobClassificationRuleRequest req, CancellationToken ct)
     {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var job = await db.MonitoredJobs.FindAsync([jobId], ct);
         if (job is null) return NotFound();
@@ -242,7 +622,7 @@ public class ConfigController(
             Confidence  = req.Confidence,
             Priority    = req.Priority,
             IsActive    = req.IsActive,
-            CreatedBy   = "operator",
+            CreatedBy   = req.OperatorId,
         };
         db.ClassificationRules.Add(rule);
         await db.SaveChangesAsync(ct);
@@ -254,12 +634,25 @@ public class ConfigController(
             IsActive       = true,
         });
         await db.SaveChangesAsync(ct);
+
+        await WriteAuditAsync(
+            entityType: "ClassificationRule",
+            entityId:   rule.RuleId.ToString(),
+            eventType:  "ClassificationRuleCreated",
+            actor:      req.OperatorId,
+            detail:     $"Created ClassificationRule for MonitoredJob {jobId} (ErrorTypeId={req.ErrorTypeId}, Pattern='{rule.Pattern}', Confidence={rule.Confidence}, Priority={rule.Priority}) and linked it",
+            ct: ct);
+
         return Ok(new { rule.RuleId });
     }
 
     [HttpPost("monitored-jobs/{jobId:int}/classification-rules/{ruleId:int}/link")]
-    public async Task<IActionResult> LinkJobClassificationRule(int jobId, int ruleId, CancellationToken ct)
+    public async Task<IActionResult> LinkJobClassificationRule(
+        int jobId, int ruleId,
+        [FromQuery] string operatorId, CancellationToken ct)
     {
+        if (MissingOperator(operatorId, out var opErr)) return opErr;
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         if (await db.MonitoredJobs.FindAsync([jobId], ct) is null) return NotFound("Job not found");
         if (await db.ClassificationRules.FindAsync([ruleId], ct) is null) return NotFound("Rule not found");
@@ -268,38 +661,96 @@ public class ConfigController(
         if (exists) return Conflict("Rule already linked to this job");
         db.MonitoredJobRules.Add(new MonitoredJobRule { MonitoredJobId = jobId, RuleId = ruleId, IsActive = true });
         await db.SaveChangesAsync(ct);
+
+        // Linking is a relationship change, not an entity edit; audit it
+        // against the MonitoredJob so an auditor scanning a job's history
+        // sees both job-level and link-level events together.
+        await WriteAuditAsync(
+            entityType: "MonitoredJob",
+            entityId:   jobId.ToString(),
+            eventType:  "ClassificationRuleLinked",
+            actor:      operatorId,
+            detail:     $"Linked ClassificationRule {ruleId} to MonitoredJob {jobId}",
+            ct: ct);
+
         return Ok(new { ruleId });
     }
 
     [HttpDelete("monitored-jobs/{jobId:int}/classification-rules/{ruleId:int}")]
-    public async Task<IActionResult> DeleteJobClassificationRule(int jobId, int ruleId, CancellationToken ct)
+    public async Task<IActionResult> DeleteJobClassificationRule(
+        int jobId, int ruleId,
+        [FromQuery] string operatorId, CancellationToken ct)
     {
+        if (MissingOperator(operatorId, out var opErr)) return opErr;
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var link = await db.MonitoredJobRules
             .FirstOrDefaultAsync(r => r.MonitoredJobId == jobId && r.RuleId == ruleId, ct);
         if (link is null) return NotFound();
         db.MonitoredJobRules.Remove(link);
         await db.SaveChangesAsync(ct);
+
+        await WriteAuditAsync(
+            entityType: "MonitoredJob",
+            entityId:   jobId.ToString(),
+            eventType:  "ClassificationRuleUnlinked",
+            actor:      operatorId,
+            detail:     $"Unlinked ClassificationRule {ruleId} from MonitoredJob {jobId}",
+            ct: ct);
+
         return NoContent();
     }
 
     // ── Fix Policy Rules ─────────────────────────────────────────────────────
 
     [HttpGet("fix-policy-rules")]
-    public async Task<IActionResult> GetFixPolicyRules([FromQuery] int? jobTypeId, CancellationToken ct)
+    public async Task<IActionResult> GetFixPolicyRules(
+        [FromQuery] int? jobTypeId,
+        [FromQuery] int? monitoredJobId,
+        CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
-        var q = db.FixPolicyRules.Include(r => r.ErrorType).Where(r => r.Enabled);
-        if (jobTypeId.HasValue) q = q.Where(r => r.JobTypeId == jobTypeId.Value);
-        var rules = await q.OrderBy(r => r.ErrorTypeId).ToListAsync(ct);
+        // Steps include is split so EF doesn't Cartesian-join ErrorType ×
+        // Steps when both are pulled in the same query.
+        var q = db.FixPolicyRules
+            .Include(r => r.ErrorType)
+            .Include(r => r.Steps.OrderBy(s => s.StepOrder))
+            .AsSplitQuery()
+            .Where(r => r.Enabled);
+
+        // Filtering semantics:
+        //   monitoredJobId set → returns defaults for the job's JobType
+        //                        PLUS any override scoped to that job.
+        //                        Lets the per-job Fix Options tab show the
+        //                        full effective config for that job.
+        //   jobTypeId only     → returns every enabled rule under the JobType
+        //                        (defaults + all overrides for any of its jobs).
+        //   neither            → returns every enabled rule.
+        if (monitoredJobId.HasValue)
+        {
+            q = q.Where(r =>
+                (r.MonitoredJobId == monitoredJobId.Value)
+             || (r.MonitoredJobId == null && jobTypeId.HasValue && r.JobTypeId == jobTypeId.Value));
+        }
+        else if (jobTypeId.HasValue)
+        {
+            q = q.Where(r => r.JobTypeId == jobTypeId.Value);
+        }
+
+        var rules = await q.OrderBy(r => r.ErrorTypeId).ThenBy(r => r.MonitoredJobId).ToListAsync(ct);
         return Ok(rules.Select(r => new
         {
-            r.RuleId, r.JobTypeId, r.ErrorTypeId,
+            r.RuleId, r.JobTypeId, r.ErrorTypeId, r.MonitoredJobId,
             ErrorTypeCode      = r.ErrorType?.Code ?? r.ErrorTypeId.ToString(),
             r.ActionToApply,
             FixCategory        = r.FixCategory.ToString(),
             ActionType         = r.ActionType.ToString(),
             r.ActionPayload, r.IsAutoHealEligible, r.Enabled,
+            // Empty array (not null) for non-composite — cleaner on the wire.
+            Steps              = r.Steps
+                .OrderBy(s => s.StepOrder)
+                .Select(s => new { s.StepId, s.StepOrder, ActionType = s.ActionType.ToString(), s.ActionPayload, s.Description })
+                .ToList(),
         }));
     }
 
@@ -309,76 +760,263 @@ public class ConfigController(
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var r = await db.FixPolicyRules
             .Include(p => p.ErrorType)
+            .Include(p => p.Steps.OrderBy(s => s.StepOrder))
+            .AsSplitQuery()
             .FirstOrDefaultAsync(p => p.RuleId == id, ct);
         if (r is null) return NotFound();
         return Ok(new
         {
-            r.RuleId, r.JobTypeId, r.ErrorTypeId,
+            r.RuleId, r.JobTypeId, r.ErrorTypeId, r.MonitoredJobId,
             ErrorTypeCode = r.ErrorType?.Code ?? r.ErrorTypeId.ToString(),
             r.ActionToApply,
             FixCategory   = r.FixCategory.ToString(),
             ActionType    = r.ActionType.ToString(),
             r.ActionPayload, r.IsAutoHealEligible, r.Enabled,
+            Steps         = r.Steps
+                .OrderBy(s => s.StepOrder)
+                .Select(s => new { s.StepId, s.StepOrder, ActionType = s.ActionType.ToString(), s.ActionPayload, s.Description })
+                .ToList(),
         });
     }
 
     [HttpPost("fix-policy-rules")]
     public async Task<IActionResult> CreateFixPolicyRule([FromBody] UpsertFixPolicyRuleRequest req, CancellationToken ct)
     {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         if (!Enum.TryParse<FixCategory>(req.FixCategory, out var fixCategory))
             return BadRequest($"Unknown FixCategory: '{req.FixCategory}'");
         if (!Enum.TryParse<FixActionType>(req.ActionType, out var actionType))
             return BadRequest($"Unknown ActionType: '{req.ActionType}'");
 
+        // Composite-shape validation. Same rules apply to Create and Update;
+        // see ValidateCompositePayload for the eight individual checks.
+        if (ValidateCompositePayload(req, actionType, out var validationError, out var validatedSteps))
+            return validationError;
+
+        // Two-pronged duplicate check — different layer, different key:
+        //   • Override layer: at most one enabled rule per (MonitoredJobId, ErrorTypeId)
+        //   • Default  layer: at most one enabled rule per (JobTypeId, ErrorTypeId) AND MonitoredJobId IS NULL
+        // A default + an override for the same (JobType, ErrorType) are NOT
+        // duplicates — they're complementary by design. The filtered unique
+        // indexes on the DB enforce the same two-pronged constraint as the
+        // last line of defence.
+        if (req.Enabled)
+        {
+            var conflict = req.MonitoredJobId is int monId
+                ? await db.FixPolicyRules.FirstOrDefaultAsync(
+                    p => p.MonitoredJobId == monId
+                      && p.ErrorTypeId    == req.ErrorTypeId
+                      && p.Enabled, ct)
+                : await db.FixPolicyRules.FirstOrDefaultAsync(
+                    p => p.JobTypeId      == req.JobTypeId
+                      && p.ErrorTypeId    == req.ErrorTypeId
+                      && p.MonitoredJobId == null
+                      && p.Enabled, ct);
+            if (conflict is not null)
+            {
+                return Conflict(new
+                {
+                    error               = "DuplicateFixPolicy",
+                    message             = req.MonitoredJobId.HasValue
+                        ? "An active fix policy override already exists for this job + Error Type combination. Disable the existing override or edit it instead of creating a new one."
+                        : "An active fix policy already exists for this Job Type + Error Type combination. Disable the existing policy or edit it instead of creating a new one.",
+                    conflictingPolicyId = conflict.RuleId,
+                });
+            }
+        }
+
         var rule = new FixPolicyRule
         {
             JobTypeId          = req.JobTypeId,
             ErrorTypeId        = req.ErrorTypeId,
+            MonitoredJobId     = req.MonitoredJobId,
             ActionToApply      = req.ActionToApply,
             FixCategory        = fixCategory,
             ActionType         = actionType,
-            ActionPayload      = req.ActionPayload,
+            // Composite header has no payload of its own (validated above).
+            ActionPayload      = actionType == FixActionType.Composite ? null : req.ActionPayload,
             IsAutoHealEligible = req.IsAutoHealEligible,
             Enabled            = req.Enabled,
-            CreatedBy          = "operator",
+            CreatedBy          = req.OperatorId,
             ActionTimestamp    = DateTime.Now,
         };
         db.FixPolicyRules.Add(rule);
         await db.SaveChangesAsync(ct);
+
+        // Steps persistence — validatedSteps is the normalised list (orders
+        // packed 1..N). Empty for non-composite policies.
+        if (validatedSteps is { Count: > 0 })
+        {
+            foreach (var s in validatedSteps)
+                db.FixPolicyRuleSteps.Add(new FixPolicyRuleStep
+                {
+                    RuleId        = rule.RuleId,
+                    StepOrder     = s.StepOrder,
+                    ActionType    = s.ActionType,
+                    ActionPayload = s.ActionPayload,
+                    Description   = s.Description,
+                });
+            await db.SaveChangesAsync(ct);
+        }
+
+        var stepSummary = validatedSteps is { Count: > 0 }
+            ? $", {validatedSteps.Count} steps: {string.Join(", ", validatedSteps.Select(s => s.ActionType))}"
+            : string.Empty;
+
+        await WriteAuditAsync(
+            entityType: "FixPolicyRule",
+            entityId:   rule.RuleId.ToString(),
+            eventType:  "FixPolicyCreated",
+            actor:      req.OperatorId,
+            detail:     $"Created FixPolicyRule (JobTypeId={rule.JobTypeId}, ErrorTypeId={rule.ErrorTypeId}, MonitoredJobId={FormatValue((object?)rule.MonitoredJobId)}, FixCategory={rule.FixCategory}, ActionType={rule.ActionType}, IsAutoHealEligible={FormatValue(rule.IsAutoHealEligible)}, Enabled={FormatValue(rule.Enabled)}{stepSummary})",
+            ct: ct);
+
         return Ok(new { rule.RuleId });
     }
 
     [HttpPut("fix-policy-rules/{id:int}")]
     public async Task<IActionResult> UpdateFixPolicyRule(int id, [FromBody] UpsertFixPolicyRuleRequest req, CancellationToken ct)
     {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
-        var rule = await db.FixPolicyRules.FindAsync([id], ct);
+        var rule = await db.FixPolicyRules
+            .Include(r => r.Steps)
+            .FirstOrDefaultAsync(r => r.RuleId == id, ct);
         if (rule is null) return NotFound();
         if (!Enum.TryParse<FixCategory>(req.FixCategory, out var fixCat))
             return BadRequest($"Unknown FixCategory: '{req.FixCategory}'");
         if (!Enum.TryParse<FixActionType>(req.ActionType, out var actType))
             return BadRequest($"Unknown ActionType: '{req.ActionType}'");
 
+        // Composite-shape validation — same rules as Create.
+        if (ValidateCompositePayload(req, actType, out var validationError, out var validatedSteps))
+            return validationError;
+
+        // Two-pronged duplicate guard, same as Create but excluding self.
+        // The req.MonitoredJobId on the PUT determines which layer the
+        // resulting row will live in — switching layers via edit is allowed,
+        // but must not produce two enabled rows at the same key.
+        if (req.Enabled)
+        {
+            var conflict = req.MonitoredJobId is int monId
+                ? await db.FixPolicyRules.FirstOrDefaultAsync(
+                    p => p.RuleId         != id
+                      && p.MonitoredJobId == monId
+                      && p.ErrorTypeId    == req.ErrorTypeId
+                      && p.Enabled, ct)
+                : await db.FixPolicyRules.FirstOrDefaultAsync(
+                    p => p.RuleId         != id
+                      && p.JobTypeId      == req.JobTypeId
+                      && p.ErrorTypeId    == req.ErrorTypeId
+                      && p.MonitoredJobId == null
+                      && p.Enabled, ct);
+            if (conflict is not null)
+            {
+                return Conflict(new
+                {
+                    error               = "DuplicateFixPolicy",
+                    message             = req.MonitoredJobId.HasValue
+                        ? "An active fix policy override already exists for this job + Error Type combination. Disable the existing override or edit it instead of creating a new one."
+                        : "An active fix policy already exists for this Job Type + Error Type combination. Disable the existing policy or edit it instead of creating a new one.",
+                    conflictingPolicyId = conflict.RuleId,
+                });
+            }
+        }
+
+        // IsAutoHealEligible flips are the highest-stakes config change in
+        // the whole system — an auto-heal toggle decides whether a future
+        // recommendation runs without human review. Capture every field.
+        // MonitoredJobId is captured too — flipping a default into an
+        // override (or vice versa) is a scope change worth auditing.
+        var beforeErrorTypeId    = rule.ErrorTypeId;
+        var beforeMonitoredJobId = rule.MonitoredJobId;
+        var beforeActionToApply  = rule.ActionToApply;
+        var beforeFixCategory    = rule.FixCategory;
+        var beforeActionType     = rule.ActionType;
+        var beforeActionPayload  = rule.ActionPayload;
+        var beforeIsAutoHeal     = rule.IsAutoHealEligible;
+        var beforeEnabled        = rule.Enabled;
+
+        // Snapshot prior step shape for the diff (operator-visible summary).
+        var beforeStepShape = SummariseSteps(rule.Steps);
+
         rule.ErrorTypeId        = req.ErrorTypeId;
+        rule.MonitoredJobId     = req.MonitoredJobId;
         rule.ActionToApply      = req.ActionToApply;
         rule.FixCategory        = fixCat;
         rule.ActionType         = actType;
-        rule.ActionPayload      = req.ActionPayload;
+        rule.ActionPayload      = actType == FixActionType.Composite ? null : req.ActionPayload;
         rule.IsAutoHealEligible = req.IsAutoHealEligible;
         rule.Enabled            = req.Enabled;
+
+        // Steps update: replace-all. Diffing would be cleaner per-step but
+        // steps are small, replace-all keeps the code simple and the cascade
+        // FK handles orphan deletes for us. Validated steps already have
+        // packed orders 1..N.
+        db.FixPolicyRuleSteps.RemoveRange(rule.Steps);
+        if (validatedSteps is { Count: > 0 })
+        {
+            foreach (var s in validatedSteps)
+                db.FixPolicyRuleSteps.Add(new FixPolicyRuleStep
+                {
+                    RuleId        = rule.RuleId,
+                    StepOrder     = s.StepOrder,
+                    ActionType    = s.ActionType,
+                    ActionPayload = s.ActionPayload,
+                    Description   = s.Description,
+                });
+        }
+
         await db.SaveChangesAsync(ct);
+
+        var afterStepShape = SummariseSteps(rule.Steps);
+        var diff = BuildDiff(
+            ("ErrorTypeId",        beforeErrorTypeId,    rule.ErrorTypeId),
+            ("MonitoredJobId",     (object?)beforeMonitoredJobId, (object?)rule.MonitoredJobId),
+            ("ActionToApply",      beforeActionToApply,  rule.ActionToApply),
+            ("FixCategory",        beforeFixCategory,    rule.FixCategory),
+            ("ActionType",         beforeActionType,     rule.ActionType),
+            ("ActionPayload",      beforeActionPayload,  rule.ActionPayload),
+            ("IsAutoHealEligible", beforeIsAutoHeal,     rule.IsAutoHealEligible),
+            ("Enabled",            beforeEnabled,        rule.Enabled),
+            ("Steps",              beforeStepShape,      afterStepShape));
+        await WriteAuditAsync(
+            entityType: "FixPolicyRule",
+            entityId:   id.ToString(),
+            eventType:  "FixPolicyUpdated",
+            actor:      req.OperatorId,
+            detail:     diff.Length > 0 ? diff : "No changes",
+            ct: ct);
+
         return NoContent();
     }
 
     [HttpDelete("fix-policy-rules/{id:int}")]
-    public async Task<IActionResult> DeleteFixPolicyRule(int id, CancellationToken ct)
+    public async Task<IActionResult> DeleteFixPolicyRule(
+        int id, [FromQuery] string operatorId, CancellationToken ct)
     {
+        if (MissingOperator(operatorId, out var opErr)) return opErr;
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = await db.FixPolicyRules.FindAsync([id], ct);
         if (rule is null) return NotFound();
+        var snapshotJobTypeId   = rule.JobTypeId;
+        var snapshotErrorTypeId = rule.ErrorTypeId;
+        var snapshotActionType  = rule.ActionType;
         rule.Enabled = false;
         await db.SaveChangesAsync(ct);
+
+        await WriteAuditAsync(
+            entityType: "FixPolicyRule",
+            entityId:   id.ToString(),
+            eventType:  "FixPolicyDeleted",
+            actor:      operatorId,
+            detail:     $"Soft-deleted FixPolicyRule {id} (JobTypeId={snapshotJobTypeId}, ErrorTypeId={snapshotErrorTypeId}, ActionType={snapshotActionType})",
+            ct: ct);
+
         return NoContent();
     }
 
@@ -401,6 +1039,8 @@ public class ConfigController(
     [HttpPost("classification-rules")]
     public async Task<IActionResult> CreateClassificationRule([FromBody] UpsertClassificationRuleRequest req, CancellationToken ct)
     {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
         var rule = new ClassificationRule
         {
             JobTypeId   = req.JobTypeId,
@@ -409,18 +1049,36 @@ public class ConfigController(
             Confidence  = req.Confidence,
             Priority    = req.Priority,
             IsActive    = true,
-            CreatedBy   = "operator",
+            CreatedBy   = req.OperatorId,
         };
         var saved = await ruleRepo.SaveAsync(rule, ct);
+
+        await WriteAuditAsync(
+            entityType: "ClassificationRule",
+            entityId:   saved.RuleId.ToString(),
+            eventType:  "ClassificationRuleCreated",
+            actor:      req.OperatorId,
+            detail:     $"Created ClassificationRule (JobTypeId={saved.JobTypeId}, ErrorTypeId={saved.ErrorTypeId}, Pattern='{saved.Pattern}', Confidence={saved.Confidence}, Priority={saved.Priority})",
+            ct: ct);
+
         return Ok(new { saved.RuleId });
     }
 
     [HttpPut("classification-rules/{id:int}")]
     public async Task<IActionResult> UpdateClassificationRule(int id, [FromBody] UpsertClassificationRuleRequest req, CancellationToken ct)
     {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = await db.ClassificationRules.FindAsync([id], ct);
         if (rule is null) return NotFound();
+
+        var beforeJobTypeId   = rule.JobTypeId;
+        var beforeErrorTypeId = rule.ErrorTypeId;
+        var beforePattern     = rule.Pattern;
+        var beforeConfidence  = rule.Confidence;
+        var beforePriority    = rule.Priority;
+        var beforeIsActive    = rule.IsActive;
 
         rule.JobTypeId   = req.JobTypeId;
         rule.ErrorTypeId = req.ErrorTypeId;
@@ -430,18 +1088,58 @@ public class ConfigController(
         rule.IsActive    = req.IsActive;
 
         await db.SaveChangesAsync(ct);
+
+        var diff = BuildDiff(
+            ("JobTypeId",   beforeJobTypeId,   rule.JobTypeId),
+            ("ErrorTypeId", beforeErrorTypeId, rule.ErrorTypeId),
+            ("Pattern",     beforePattern,     rule.Pattern),
+            ("Confidence",  beforeConfidence,  rule.Confidence),
+            ("Priority",    beforePriority,    rule.Priority),
+            ("IsActive",    beforeIsActive,    rule.IsActive));
+        await WriteAuditAsync(
+            entityType: "ClassificationRule",
+            entityId:   id.ToString(),
+            eventType:  "ClassificationRuleUpdated",
+            actor:      req.OperatorId,
+            detail:     diff.Length > 0 ? diff : "No changes",
+            ct: ct);
+
         return NoContent();
     }
 
     [HttpDelete("classification-rules/{id:int}")]
-    public async Task<IActionResult> DeleteClassificationRule(int id, CancellationToken ct)
+    public async Task<IActionResult> DeleteClassificationRule(
+        int id, [FromQuery] string operatorId, CancellationToken ct)
     {
+        if (MissingOperator(operatorId, out var opErr)) return opErr;
+
+        // Capture identifying fields before the hard delete so the audit
+        // row remains intelligible after the rule is gone.
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var rule = await db.ClassificationRules.AsNoTracking()
+            .FirstOrDefaultAsync(r => r.RuleId == id, ct);
+        if (rule is null) return NotFound();
+        var rulePattern = rule.Pattern;
+
         await ruleRepo.DeleteAsync(id, ct);
+
+        await WriteAuditAsync(
+            entityType: "ClassificationRule",
+            entityId:   id.ToString(),
+            eventType:  "ClassificationRuleDeleted",
+            actor:      operatorId,
+            detail:     $"Deleted ClassificationRule {id} (Pattern='{rulePattern}')",
+            ct: ct);
+
         return NoContent();
     }
 }
 
 // ── Request contracts ────────────────────────────────────────────────────────
+
+// Every Upsert*Request includes OperatorId so the audit row knows who acted.
+// Frontend passes "operator" as a literal for now (no auth yet); when authz
+// lands the frontend will swap to the authenticated user in one sweep.
 
 public sealed record UpsertMonitoredJobRequest(
     string  Name,
@@ -454,7 +1152,11 @@ public sealed record UpsertMonitoredJobRequest(
     string? LogSourceUrl,
     int     PollingIntervalSeconds,
     bool    IsActive,
-    string? Description);
+    string? Description,
+    string  OperatorId,
+    /// <summary>Optional base folder for relative InputPathPattern captures.
+    /// FS-scan jobs only; ignored when the regex captures an absolute path.</summary>
+    string? InputFolder = null);
 
 public sealed record UpsertScanCheckRuleRequest(
     string   CheckType,
@@ -467,7 +1169,14 @@ public sealed record UpsertScanCheckRuleRequest(
     string?  SourceIdColumn,
     string   Severity,
     string?  Description,
-    bool     IsActive = true);
+    string   OperatorId,
+    bool     IsActive = true,
+    /// <summary>DB scans only — column on the source row that holds the
+    /// input file path. Read into JobFailure.SourceFilePath when matched.</summary>
+    string?  FilePathColumn   = null,
+    /// <summary>FS scans only — regex with capture group #1 = input file path
+    /// extracted from the matching error line. Null = no extraction.</summary>
+    string?  InputPathPattern = null);
 
 public sealed record UpsertClassificationRuleRequest(
     int     JobTypeId,
@@ -475,6 +1184,7 @@ public sealed record UpsertClassificationRuleRequest(
     string  Pattern,
     decimal Confidence,
     int     Priority,
+    string  OperatorId,
     bool    IsActive = true);
 
 public sealed record UpsertJobClassificationRuleRequest(
@@ -482,6 +1192,7 @@ public sealed record UpsertJobClassificationRuleRequest(
     string  Pattern,
     decimal Confidence,
     int     Priority,
+    string  OperatorId,
     bool    IsActive = true);
 
 public sealed record UpsertFixPolicyRuleRequest(
@@ -492,11 +1203,26 @@ public sealed record UpsertFixPolicyRuleRequest(
     string  ActionType,
     string? ActionPayload,
     bool    IsAutoHealEligible,
-    bool    Enabled);
+    bool    Enabled,
+    string  OperatorId,
+    /// <summary>NULL = JobType-level default (applies to all jobs of JobTypeId).
+    /// Set = MonitoredJob-scoped override that wins over the default for this one job.</summary>
+    int?    MonitoredJobId = null,
+    /// <summary>Ordered steps for Composite policies. Required when
+    /// ActionType=Composite; must be null/empty otherwise. Controller normalises
+    /// StepOrder to 1..N (gaps allowed in input).</summary>
+    IReadOnlyList<FixPolicyStepDto>? Steps = null);
+
+public sealed record FixPolicyStepDto(
+    int     StepOrder,
+    string  ActionType,
+    string  ActionPayload,
+    string? Description);
 
 public sealed record UpsertErrorTypeRequest(
     string  Code,
     string  DisplayName,
     string? Description,
     string  Severity,
+    string  OperatorId,
     bool    IsActive = true);

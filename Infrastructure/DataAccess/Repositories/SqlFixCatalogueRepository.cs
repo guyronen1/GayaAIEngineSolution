@@ -1,4 +1,5 @@
-﻿using MaiaAI.Core.Interfaces;
+﻿using MaiaAI.Core.Entities;
+using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Results;
 using Microsoft.EntityFrameworkCore;
 
@@ -14,14 +15,34 @@ public sealed class SqlFixCatalogueRepository(IDbContextFactory<AiDbContext> fac
     public async Task<FixCatalogueEntry?> GetEntryAsync(
         string errorTypeCode,
         int    jobTypeId,
+        int?   monitoredJobId = null,
         CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
 
-        var rule = await db.FixPolicyRules
+        // Mirrors SqlFixPolicyRepository's two-layer lookup: override
+        // (MonitoredJob-scoped) wins over default (JobType-scoped). Same
+        // priority must apply at suggestion-generation time so the rec's
+        // frozen AutoFixAvailable snapshot reflects the policy that would
+        // actually execute, not the JobType default.
+        FixPolicyRule? rule = null;
+        if (monitoredJobId.HasValue)
+        {
+            rule = await db.FixPolicyRules
+                .Include(r => r.ErrorType)
+                .Where(r => r.Enabled
+                         && r.MonitoredJobId == monitoredJobId.Value
+                         && r.ErrorType != null
+                         && r.ErrorType.Code == errorTypeCode)
+                .OrderByDescending(r => r.ActionTimestamp)
+                .FirstOrDefaultAsync(ct);
+        }
+
+        rule ??= await db.FixPolicyRules
             .Include(r => r.ErrorType)
             .Where(r => r.Enabled
-                     && r.JobTypeId == jobTypeId
+                     && r.JobTypeId      == jobTypeId
+                     && r.MonitoredJobId == null
                      && r.ErrorType != null
                      && r.ErrorType.Code == errorTypeCode)
             .OrderByDescending(r => r.ActionTimestamp)

@@ -17,4 +17,10 @@ namespace MaiaAI.Core.Results;
 public sealed record RecommendationListItem(
     AiRecommendation Recommendation,
     int?             FixPolicyRuleId,
-    bool?            PolicyIsAutoHealEligible);
+    bool?            PolicyIsAutoHealEligible,
+    int              PolicyStepCount);
+
+// PolicyStepCount is 0 for non-composite policies AND when no policy matches.
+// Non-zero → UI renders a "Composite (N steps)" badge on the rec card and
+// expands the step list via the existing getFixPolicyRuleById endpoint
+// (which now eager-loads Steps too). Lazy expand keeps the list payload small.
