@@ -1,4 +1,4 @@
-﻿using System.Text.RegularExpressions;
+﻿using MaiaAI.Core.Classification;
 using MaiaAI.Core.Entities;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Results;
@@ -21,8 +21,6 @@ public sealed class RuleBasedClassifier(
     IMonitoredJobRepository monitoredJobRepo,
     ILogParser parser) : IClassificationStrategy
 {
-    private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(50);
-
     public async Task<ClassificationResult?> ClassifyAsync(
         JobFailure job,
         string logContent,
@@ -39,7 +37,7 @@ public sealed class RuleBasedClassifier(
 
         foreach (var rule in rules)
         {
-            var match = lines.FirstOrDefault(l => Matches(l, rule.Pattern));
+            var match = lines.FirstOrDefault(l => ClassificationMatcher.IsMatch(l, rule.Pattern));
 
             if (match is not null)
             {
@@ -60,33 +58,5 @@ public sealed class RuleBasedClassifier(
         }
 
         return null;
-    }
-
-    /// <summary>
-    /// Case-insensitive substring match with optional <c>*</c> wildcards.
-    /// Patterns without <c>*</c> use the fast <see cref="string.Contains(string, StringComparison)"/>
-    /// path; patterns with <c>*</c> are compiled to a regex that escapes every other
-    /// character so regex metacharacters (<c>.</c>, <c>+</c>, <c>[</c>, etc.) are
-    /// treated literally. ReDoS-safe by construction (no nested quantifiers,
-    /// no backreferences) but a 50ms timeout is enforced as defence-in-depth.
-    /// </summary>
-    private static bool Matches(string line, string pattern)
-    {
-        if (string.IsNullOrEmpty(pattern))
-            return false;
-
-        if (!pattern.Contains('*'))
-            return line.Contains(pattern, StringComparison.OrdinalIgnoreCase);
-
-        var regex = string.Join(".*", pattern.Split('*').Select(Regex.Escape));
-
-        try
-        {
-            return Regex.IsMatch(line, regex, RegexOptions.IgnoreCase, RegexTimeout);
-        }
-        catch (RegexMatchTimeoutException)
-        {
-            return false;
-        }
     }
 }

@@ -112,6 +112,17 @@ public sealed class SqlJobRepository(IDbContextFactory<AiDbContext> factory) : I
                                         x.FailureId == j.FailureId
                                      && !x.Success
                                      && x.ExecutedAt >= todayStart)),
+            // Active failures the system can't act on for lack of config:
+            // unclassified (no ErrorType) OR classified but no enabled
+            // FixPolicyRule applies (override-then-default scope). Matches the
+            // dashboard "Unconfigured" KPI count exactly.
+            "unconfigured"    => query.Where(j =>
+                                    j.Status == JobStatus.Failed
+                                 && (j.ErrorTypeId == null
+                                     || !db.FixPolicyRules.Any(p => p.Enabled
+                                            && p.ErrorTypeId == j.ErrorTypeId
+                                            && (p.MonitoredJobId == j.MonitoredJobId
+                                                || (p.MonitoredJobId == null && p.JobTypeId == j.JobTypeId))))),
             _ => query, // null / "" / "all" / unknown → no filter
         };
 

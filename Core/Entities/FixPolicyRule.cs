@@ -30,6 +30,14 @@ public class FixPolicyRule
     public string? CreatedBy { get; set; }
     public DateTime ActionTimestamp { get; set; }
 
+    // ── Suggestion provenance (v2-readiness) ─────────────────────────────────
+    // Populated when this policy was created in response to an /unconfigured
+    // Case-B (missing-policy) gap; null for manually-created policies. Same
+    // semantics + shape as ClassificationRule's provenance fields.
+    public string?  SuggestedBy { get; set; }
+    public string?  SuggestedFromHash { get; set; }
+    public decimal? SuggestedConfidence { get; set; }
+
     // ── Execution wiring ─────────────────────────────────────────────────────
 
     /// <summary>How to execute the fix automatically.</summary>

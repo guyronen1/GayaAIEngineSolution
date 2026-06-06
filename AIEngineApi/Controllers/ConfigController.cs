@@ -841,6 +841,10 @@ public class ConfigController(
             Enabled            = req.Enabled,
             CreatedBy          = req.OperatorId,
             ActionTimestamp    = DateTime.Now,
+            // Provenance when created from an /unconfigured Case-B gap (else null).
+            SuggestedBy         = req.SuggestedBy,
+            SuggestedFromHash   = req.SuggestedFromHash,
+            SuggestedConfidence = req.SuggestedConfidence,
         };
         db.FixPolicyRules.Add(rule);
         await db.SaveChangesAsync(ct);
@@ -1026,13 +1030,26 @@ public class ConfigController(
     public async Task<IActionResult> GetAllClassificationRules(CancellationToken ct)
     {
         var rules = await ruleRepo.GetAllAsync(ct);
+
+        // Active job links per rule → drives the "Scope" column: no links =
+        // JobType default (all jobs of the type); links = scoped to those jobs.
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var links = await (from m in db.MonitoredJobRules
+                           where m.IsActive
+                           join j in db.MonitoredJobs on m.MonitoredJobId equals j.MonitoredJobId
+                           select new { m.RuleId, j.Name }).ToListAsync(ct);
+        var linkedJobsByRule = links
+            .GroupBy(l => l.RuleId)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.Name).OrderBy(n => n).ToList());
+
         return Ok(rules.Select(r => new
         {
             r.RuleId, r.JobTypeId,
             JobTypeName  = r.JobType?.Name ?? r.JobTypeId.ToString(),
             r.ErrorTypeId,
             ErrorTypeCode = r.ErrorType?.Code ?? r.ErrorTypeId.ToString(),
-            r.Pattern, r.Confidence, r.Priority, r.IsActive, r.CreatedBy
+            r.Pattern, r.Confidence, r.Priority, r.IsActive, r.CreatedBy,
+            LinkedJobNames = linkedJobsByRule.GetValueOrDefault(r.RuleId, new List<string>()),
         }));
     }
 
@@ -1040,6 +1057,22 @@ public class ConfigController(
     public async Task<IActionResult> CreateClassificationRule([FromBody] UpsertClassificationRuleRequest req, CancellationToken ct)
     {
         if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
+        // Duplicate guard (backend layer): at most one ENABLED rule per
+        // (JobTypeId, Pattern). Returns an actionable 409 so the UI can offer
+        // "open existing" instead of the operator silently creating a copy
+        // (which the /unconfigured retry-on-no-effect flow did 4× in practice).
+        await using (var dupDb = await dbFactory.CreateDbContextAsync(ct))
+        {
+            var dupId = await FindActiveClassificationDuplicateAsync(dupDb, req.JobTypeId, req.Pattern, null, ct);
+            if (dupId is not null)
+                return Conflict(new
+                {
+                    error = "DuplicateClassificationRule",
+                    message = $"An enabled classification rule with this pattern already exists for this job type (rule {dupId}).",
+                    conflictingRuleId = dupId,
+                });
+        }
 
         var rule = new ClassificationRule
         {
@@ -1050,6 +1083,10 @@ public class ConfigController(
             Priority    = req.Priority,
             IsActive    = true,
             CreatedBy   = req.OperatorId,
+            // Provenance when accepted from an /unconfigured cluster (else null).
+            SuggestedBy         = req.SuggestedBy,
+            SuggestedFromHash   = req.SuggestedFromHash,
+            SuggestedConfidence = req.SuggestedConfidence,
         };
         var saved = await ruleRepo.SaveAsync(rule, ct);
 
@@ -1072,6 +1109,19 @@ public class ConfigController(
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = await db.ClassificationRules.FindAsync([id], ct);
         if (rule is null) return NotFound();
+
+        // Duplicate guard — only an ENABLED rule can collide. Excludes self.
+        if (req.IsActive)
+        {
+            var dupId = await FindActiveClassificationDuplicateAsync(db, req.JobTypeId, req.Pattern, id, ct);
+            if (dupId is not null)
+                return Conflict(new
+                {
+                    error = "DuplicateClassificationRule",
+                    message = $"An enabled classification rule with this pattern already exists for this job type (rule {dupId}).",
+                    conflictingRuleId = dupId,
+                });
+        }
 
         var beforeJobTypeId   = rule.JobTypeId;
         var beforeErrorTypeId = rule.ErrorTypeId;
@@ -1133,6 +1183,20 @@ public class ConfigController(
 
         return NoContent();
     }
+
+    /// <summary>
+    /// Returns the RuleId of an ENABLED ClassificationRule with the same
+    /// (JobTypeId, Pattern) — the active-key duplicate. Case-insensitive via
+    /// the DB collation (matches the unique index + the classifier's matching).
+    /// <paramref name="excludeRuleId"/> skips self on update.
+    /// </summary>
+    private static async Task<int?> FindActiveClassificationDuplicateAsync(
+        AiDbContext db, int jobTypeId, string pattern, int? excludeRuleId, CancellationToken ct)
+        => await db.ClassificationRules
+            .Where(r => r.IsActive && r.JobTypeId == jobTypeId && r.Pattern == pattern
+                     && (excludeRuleId == null || r.RuleId != excludeRuleId))
+            .Select(r => (int?)r.RuleId)
+            .FirstOrDefaultAsync(ct);
 }
 
 // ── Request contracts ────────────────────────────────────────────────────────
@@ -1185,7 +1249,12 @@ public sealed record UpsertClassificationRuleRequest(
     decimal Confidence,
     int     Priority,
     string  OperatorId,
-    bool    IsActive = true);
+    bool    IsActive = true,
+    // Suggestion provenance — set only when accepted from an /unconfigured
+    // cluster; null for manual creation. Applied on CREATE only (ignored on update).
+    string?  SuggestedBy = null,
+    string?  SuggestedFromHash = null,
+    decimal? SuggestedConfidence = null);
 
 public sealed record UpsertJobClassificationRuleRequest(
     int     ErrorTypeId,
@@ -1211,7 +1280,12 @@ public sealed record UpsertFixPolicyRuleRequest(
     /// <summary>Ordered steps for Composite policies. Required when
     /// ActionType=Composite; must be null/empty otherwise. Controller normalises
     /// StepOrder to 1..N (gaps allowed in input).</summary>
-    IReadOnlyList<FixPolicyStepDto>? Steps = null);
+    IReadOnlyList<FixPolicyStepDto>? Steps = null,
+    // Suggestion provenance — set only when created in response to an
+    // /unconfigured Case-B gap; null for manual creation. Applied on CREATE only.
+    string?  SuggestedBy = null,
+    string?  SuggestedFromHash = null,
+    decimal? SuggestedConfidence = null);
 
 public sealed record FixPolicyStepDto(
     int     StepOrder,

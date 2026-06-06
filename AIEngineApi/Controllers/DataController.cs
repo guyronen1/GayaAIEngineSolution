@@ -649,6 +649,22 @@ public class DataController(
                          && x.ExecutedAt >= todayStart))
             .CountAsync(ct);
 
+        // Unconfigured — active (Failed) failures the system can't act on for
+        // lack of config: either unclassified (no ErrorType — needs a
+        // classification rule) OR classified but no enabled FixPolicyRule
+        // applies for its ErrorType+scope (needs a fix policy). The "no policy"
+        // arm mirrors the override-then-default lookup. Matches the
+        // `view=unconfigured` drill-down predicate exactly. `unclassified`
+        // (computed above) is the first arm; `unconfiguredNoPolicy` is the rest.
+        var unconfigured = await db.JobFailures.CountAsync(f =>
+            f.Status == JobStatus.Failed
+            && (f.ErrorTypeId == null
+                || !db.FixPolicyRules.Any(p => p.Enabled
+                       && p.ErrorTypeId == f.ErrorTypeId
+                       && (p.MonitoredJobId == f.MonitoredJobId
+                           || (p.MonitoredJobId == null && p.JobTypeId == f.JobTypeId)))), ct);
+        var unconfiguredNoPolicy = unconfigured - unclassified;
+
         return Ok(new
         {
             totalFailures,
@@ -663,6 +679,8 @@ public class DataController(
             autoFixedToday,
             manuallyFixedToday,
             fixFailedToday,
+            unconfigured,
+            unconfiguredNoPolicy,
         });
     }
 

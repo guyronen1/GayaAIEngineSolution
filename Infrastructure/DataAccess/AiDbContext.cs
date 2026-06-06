@@ -119,6 +119,19 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(r => r.Priority).IsRequired();
             e.Property(r => r.IsActive).HasDefaultValue(true);
             e.Property(r => r.CreatedBy).HasMaxLength(100);
+            e.Property(r => r.SuggestedBy).HasMaxLength(50);
+            e.Property(r => r.SuggestedFromHash).HasMaxLength(64);
+            e.Property(r => r.SuggestedConfidence).HasPrecision(5, 2);
+
+            // At most one ENABLED rule per (JobType, Pattern). Filtered so
+            // disabled rows can duplicate freely (staged replacement) — mirrors
+            // the FixPolicyRules active-key indexes. Case-insensitive collation
+            // means "Error"/"error" collide, matching the classifier's
+            // case-insensitive matching. Floor of the 3-layer duplicate guard.
+            e.HasIndex(r => new { r.JobTypeId, r.Pattern })
+                .HasFilter("[IsActive] = 1")
+                .IsUnique()
+                .HasDatabaseName("UX_ClassificationRules_ActiveKey");
 
             e.HasOne(r => r.JobType)
                 .WithMany(jt => jt.ClassificationRules)
@@ -143,6 +156,9 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(r => r.IsAutoHealEligible).HasDefaultValue(false);
             e.Property(r => r.Enabled).HasDefaultValue(true);
             e.Property(r => r.CreatedBy).HasMaxLength(100);
+            e.Property(r => r.SuggestedBy).HasMaxLength(50);
+            e.Property(r => r.SuggestedFromHash).HasMaxLength(64);
+            e.Property(r => r.SuggestedConfidence).HasPrecision(5, 2);
             e.Property(r => r.ActionTimestamp).HasDefaultValueSql("GETDATE()");
             e.Property(r => r.ActionType).IsRequired().HasMaxLength(50).HasConversion<string>().HasDefaultValue(FixActionType.Manual);
             e.Property(r => r.ActionPayload).HasColumnType("nvarchar(max)");

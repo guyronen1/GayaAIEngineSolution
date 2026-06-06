@@ -1,4 +1,6 @@
 ﻿using MaiaAI.Core.Interfaces;
+using MaiaAI.Core.Analysis;
+using MaiaAI.Infrastructure.Analysis;
 using MaiaAI.Infrastructure.Classification;
 using MaiaAI.Infrastructure.DataAccess;
 using MaiaAI.Infrastructure.DataAccess.Repositories;
@@ -44,6 +46,10 @@ public static class ServiceCollectionExtensions
 
         // ── Classification strategy (swap for ML/LLM here) ──────────────────
         services.AddScoped<IClassificationStrategy, RuleBasedClassifier>();
+
+        // ── Unconfigured-failure cluster analyzer (v2 seam: add embedding/LLM
+        //    implementations here and the /unconfigured controller swaps them). ─
+        services.AddScoped<IUnconfiguredClusterAnalyzer, NgramClusterAnalyzer>();
 
         // ── Fix catalogue: DB-driven with built-in fallback ─────────────────
         services.AddScoped<IFixCatalogue, DbFixCatalogue>();

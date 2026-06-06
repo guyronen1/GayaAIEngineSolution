@@ -67,20 +67,31 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
 
         if (job is null) return [];
 
-        if (job.JobRules.Any())
-        {
-            return job.JobRules
-                .Select(jr => jr.Rule!)
-                .Where(r => r.IsActive)
-                .OrderBy(r => r.Priority)
-                .ToList();
-        }
+        // UNION semantics (replaces the old "linked-only when any links exist").
+        // A JobType-level classification rule applies to every job of that type;
+        // per-job linked rules ADD on top. The classifier returns the first
+        // matching rule in list order, so ordering linked rules FIRST gives
+        // "linked beats global" (mirrors the FixPolicyRule override→default
+        // precedence): a global only fires on a line no linked rule matched.
+        var linked = job.JobRules
+            .Select(jr => jr.Rule!)
+            .Where(r => r is { IsActive: true })
+            .OrderBy(r => r.Priority)
+            .ToList();
 
-        return await db.ClassificationRules
+        // JobType DEFAULTS = active rules of this JobType with NO active job
+        // link. A rule linked to a specific job is THAT job's override and must
+        // not leak to its siblings — so exclude any rule that has an active
+        // MonitoredJobRules link (this job's own links are already in `linked`).
+        var globals = await db.ClassificationRules
             .Include(r => r.ErrorType)
-            .Where(r => r.JobTypeId == job.JobTypeId && r.IsActive)
+            .Where(r => r.JobTypeId == job.JobTypeId && r.IsActive
+                     && !db.MonitoredJobRules.Any(m => m.RuleId == r.RuleId && m.IsActive))
             .OrderBy(r => r.Priority)
             .ToListAsync(ct);
+
+        // This job's overrides first (by Priority), then the JobType defaults.
+        return linked.Concat(globals).ToList();
     }
 
     public async Task<List<MonitoredJob>> GetAllWithRulesAsync(CancellationToken ct = default)
