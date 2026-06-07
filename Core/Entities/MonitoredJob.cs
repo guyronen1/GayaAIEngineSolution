@@ -37,6 +37,11 @@ public class MonitoredJob
     /// <summary>Comma-separated glob patterns, e.g. "Trap*.log,Trap*.txt".</summary>
     public string? SearchPatterns { get; set; }
 
+    /// <summary>FileContent scans only — when true, the folder walk recurses into
+    /// subdirectories (SearchOption.AllDirectories); when false (default), only
+    /// the top level of LogFolder is scanned. Ignored by FS/DB/API scans.</summary>
+    public bool IncludeSubfolders { get; set; }
+
     /// <summary>Optional base folder for input file paths captured via a rule's
     /// InputPathPattern when the regex capture is a relative filename. Absolute
     /// captures (Path.IsPathRooted) ignore this. Used by FileSystemScanStrategy

@@ -81,10 +81,16 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ILogParser, SimpleLogParser>();
         services.AddScoped<ILogReader, FileLogReader>();
 
+        // ── File-content extractors (one per FileFormat, resolved via
+        //    IEnumerable<IFileContentExtractor>; FileContentScanStrategy dispatches
+        //    by ExtractorType). Add CSV/JSON/Excel here in v2. ──────────────────
+        services.AddScoped<IFileContentExtractor, XmlContentExtractor>();
+
         // ── Scan strategies (one per ScanType, resolved via IEnumerable<IScanStrategy>) ─
         services.AddScoped<IScanStrategy, FileSystemScanStrategy>();
         services.AddScoped<IScanStrategy, DatabaseScanStrategy>();
         services.AddScoped<IScanStrategy, ApiEndpointScanStrategy>();
+        services.AddScoped<IScanStrategy, FileContentScanStrategy>();
         services.AddHttpClient();
 
         // ── Background workers ───────────────────────────────────────────────

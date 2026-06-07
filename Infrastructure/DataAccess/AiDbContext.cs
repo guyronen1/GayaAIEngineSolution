@@ -21,6 +21,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
     public DbSet<ScanTypeDefinition>  ScanTypes           => Set<ScanTypeDefinition>();
     public DbSet<ScanCheckRule>       ScanCheckRules      => Set<ScanCheckRule>();
     public DbSet<ScanFileWatermark>   ScanFileWatermarks  => Set<ScanFileWatermark>();
+    public DbSet<ScanContentWatermark> ScanContentWatermarks => Set<ScanContentWatermark>();
     public DbSet<ScanDbWatermark>     ScanDbWatermarks    => Set<ScanDbWatermark>();
     public DbSet<MonitoredJobLease>   MonitoredJobLeases  => Set<MonitoredJobLease>();
     public DbSet<ScanRunHistory>      ScanRunHistory      => Set<ScanRunHistory>();
@@ -40,6 +41,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
         ConfigureScanTypeDefinition(mb);
         ConfigureScanCheckRule(mb);
         ConfigureScanFileWatermark(mb);
+        ConfigureScanContentWatermark(mb);
         ConfigureScanDbWatermark(mb);
         ConfigureMonitoredJob(mb);
         ConfigureMonitoredJobRule(mb);
@@ -371,6 +373,13 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(r => r.SourceIdColumn).HasMaxLength(200);
             e.Property(r => r.FilePathColumn).HasMaxLength(100);
             e.Property(r => r.InputPathPattern).HasMaxLength(500);
+            // FileContent scan fields — all nullable (NULL on FS/DB/API rules).
+            // Enums stored as their string name, matching every other enum column.
+            e.Property(r => r.ExtractorType).HasMaxLength(50).HasConversion<string>();
+            e.Property(r => r.ExtractorLocator).HasMaxLength(500);
+            e.Property(r => r.IdentifierLocator).HasMaxLength(500);
+            e.Property(r => r.ExtractorPredicateType).HasMaxLength(50).HasConversion<string>();
+            e.Property(r => r.ExtractorPredicateValue).HasMaxLength(500);
             e.Property(r => r.Severity).IsRequired().HasMaxLength(20).HasConversion<string>();
             e.Property(r => r.Description).HasMaxLength(500);
             e.Property(r => r.IsActive).HasDefaultValue(true);
@@ -417,6 +426,24 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
         });
     }
 
+    private static void ConfigureScanContentWatermark(ModelBuilder mb)
+    {
+        mb.Entity<ScanContentWatermark>(e =>
+        {
+            e.ToTable("ScanContentWatermarks");
+            e.HasKey(w => w.WatermarkId);
+            e.HasIndex(w => new { w.MonitoredJobId, w.FilePath }).IsUnique();
+            e.Property(w => w.FilePath).IsRequired().HasMaxLength(500);
+            e.Property(w => w.LastScannedAt).IsRequired().HasDefaultValueSql("GETDATE()");
+            e.Property(w => w.LastModifiedAt).IsRequired();
+
+            e.HasOne(w => w.MonitoredJob)
+                .WithMany()
+                .HasForeignKey(w => w.MonitoredJobId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+    }
+
     private static void ConfigureMonitoredJob(ModelBuilder mb)
     {
         mb.Entity<MonitoredJob>(e =>
@@ -429,6 +456,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(m => m.ScanTypeId).IsRequired().HasDefaultValue(1);
             e.Property(m => m.LogFolder).HasMaxLength(500);
             e.Property(m => m.SearchPatterns).HasMaxLength(500);
+            e.Property(m => m.IncludeSubfolders).IsRequired().HasDefaultValue(false);
             e.Property(m => m.InputFolder).HasMaxLength(500);
             e.Property(m => m.ConnectionName).HasMaxLength(200);
             e.Property(m => m.LogSourceUrl).HasMaxLength(500);
@@ -507,6 +535,8 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(r => r.CompletedAt).HasColumnType("datetime2(3)").IsRequired();
             e.Property(r => r.Outcome).HasConversion<string>().HasMaxLength(50).IsRequired();
             e.Property(r => r.Error).HasMaxLength(2000);
+            e.Property(r => r.IdentifierExtractionFailures).IsRequired().HasDefaultValue(0);
+            e.Property(r => r.OversizeFileSkips).IsRequired().HasDefaultValue(0);
 
             e.HasOne(r => r.MonitoredJob)
                 .WithMany()
@@ -573,7 +603,8 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
         mb.Entity<ScanTypeDefinition>().HasData(
             new ScanTypeDefinition { ScanTypeId = 1, Name = "FileSystem",  Description = "Scan log files in a folder matching glob patterns",          LeaseDurationSeconds = 300  },
             new ScanTypeDefinition { ScanTypeId = 2, Name = "Database",    Description = "Query a SQL table and check column values against rules",   LeaseDurationSeconds = 1800 },
-            new ScanTypeDefinition { ScanTypeId = 3, Name = "ApiEndpoint", Description = "Poll an HTTP endpoint and inspect the response",            LeaseDurationSeconds = 60   }
+            new ScanTypeDefinition { ScanTypeId = 3, Name = "ApiEndpoint", Description = "Poll an HTTP endpoint and inspect the response",            LeaseDurationSeconds = 60   },
+            new ScanTypeDefinition { ScanTypeId = 4, Name = "FileContent", Description = "Structured extraction from input data files (XML, …)",     LeaseDurationSeconds = 300  }
         );
 
         mb.Entity<MonitoredJob>().HasData(

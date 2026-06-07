@@ -40,6 +40,39 @@ public sealed class SqlScanWatermarkRepository(IDbContextFactory<AiDbContext> fa
         await db.SaveChangesAsync(ct);
     }
 
+    // ── Content watermarks (FileContent scans) ─────────────────────────────────
+
+    public async Task<DateTime?> GetContentWatermarkAsync(int monitoredJobId, string filePath, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        var wm = await db.ScanContentWatermarks
+            .FirstOrDefaultAsync(w => w.MonitoredJobId == monitoredJobId && w.FilePath == filePath, ct);
+        return wm?.LastModifiedAt;
+    }
+
+    public async Task UpsertContentWatermarkAsync(int monitoredJobId, string filePath, DateTime lastModifiedAt, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        var wm = await db.ScanContentWatermarks
+            .FirstOrDefaultAsync(w => w.MonitoredJobId == monitoredJobId && w.FilePath == filePath, ct);
+
+        if (wm is null)
+            db.ScanContentWatermarks.Add(new ScanContentWatermark
+            {
+                MonitoredJobId = monitoredJobId,
+                FilePath       = filePath,
+                LastModifiedAt = lastModifiedAt,
+                LastScannedAt  = DateTime.Now,
+            });
+        else
+        {
+            wm.LastModifiedAt = lastModifiedAt;
+            wm.LastScannedAt  = DateTime.Now;
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
     // ── Database watermarks ──────────────────────────────────────────────────
 
     public async Task<string?> GetDbWatermarkAsync(int checkRuleId, CancellationToken ct = default)

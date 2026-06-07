@@ -14,6 +14,7 @@ public sealed record MonitoredJobDto(
     string?                          LogFolder,
     string?                          SearchPatterns,
     string?                          InputFolder,
+    bool                             IncludeSubfolders,
     // Database
     string?                          ConnectionName,
     // ApiEndpoint
@@ -36,6 +37,7 @@ public sealed record MonitoredJobDto(
         m.LogFolder,
         m.SearchPatterns,
         m.InputFolder,
+        m.IncludeSubfolders,
         m.ConnectionName,
         m.LogSourceUrl,
         m.PollingIntervalSeconds,
@@ -98,6 +100,12 @@ public sealed record ScanCheckRuleDto(
     string?   SourceIdColumn,
     string?   FilePathColumn,
     string?   InputPathPattern,
+    // FileContent
+    string?   ExtractorType,
+    string?   ExtractorLocator,
+    string?   IdentifierLocator,
+    string?   ExtractorPredicateType,
+    string?   ExtractorPredicateValue,
     string    Severity,
     string?   Description)
 {
@@ -113,6 +121,11 @@ public sealed record ScanCheckRuleDto(
         r.SourceIdColumn,
         r.FilePathColumn,
         r.InputPathPattern,
+        r.ExtractorType?.ToString(),
+        r.ExtractorLocator,
+        r.IdentifierLocator,
+        r.ExtractorPredicateType?.ToString(),
+        r.ExtractorPredicateValue,
         r.Severity.ToString(),
         r.Description);
 }

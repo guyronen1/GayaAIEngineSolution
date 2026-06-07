@@ -22,5 +22,15 @@ public class ScanRunHistory
     public int      Classifications  { get; set; }
     public int      Recommendations  { get; set; }
 
+    /// <summary>FileContent scans — count of matched files where IdentifierLocator
+    /// was set but extraction yielded nothing, so SourceId fell back to the
+    /// filename. Surfaces a misconfigured IdentifierLocator without log-diving.
+    /// 0 for other scan types.</summary>
+    public int      IdentifierExtractionFailures { get; set; }
+
+    /// <summary>FileContent scans — count of files skipped this scan because they
+    /// exceeded the 5MB extraction cap. 0 for other scan types.</summary>
+    public int      OversizeFileSkips { get; set; }
+
     public MonitoredJob? MonitoredJob { get; set; }
 }

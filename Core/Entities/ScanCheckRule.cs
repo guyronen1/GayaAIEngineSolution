@@ -65,6 +65,39 @@ public class ScanCheckRule
     /// </summary>
     public string? InputPathPattern { get; set; }
 
+    // ── FileContent scan config (CheckType.FileContent only) ──────────────────
+    // For FileContent rules the existing TargetField holds the FILENAME PATTERN
+    // (same '*'-wildcard DSL as classification/FS patterns) — no separate column.
+    // The five fields below describe what to pull out of each matched file and
+    // how to decide it's a failure. All NULL on FS / DB / API rules.
+
+    /// <summary>Which IFileContentExtractor parses the matched file (XML in v1).
+    /// Required when CheckType=FileContent; controller rejects FileContent rules
+    /// with no ExtractorType.</summary>
+    public FileFormat? ExtractorType { get; set; }
+
+    /// <summary>Format-specific address of the PRIMARY value to test — for XML,
+    /// an XPath (e.g. "/file/status/code"). The extractor owns the meaning of
+    /// this string. NULL = filename match alone is the signal (no value tested).</summary>
+    public string? ExtractorLocator { get; set; }
+
+    /// <summary>Format-specific address of the natural key used as
+    /// JobFailure.SourceId — for XML, an XPath (e.g. "/file/header/invoiceId").
+    /// NULL = fall back to filename-without-extension. Extraction failure on a
+    /// set locator also falls back to filename and increments the
+    /// ScanRunHistory.IdentifierExtractionFailures counter.</summary>
+    public string? IdentifierLocator { get; set; }
+
+    /// <summary>Comparison applied to the extracted primary value. NULL = no
+    /// predicate (filename match alone fails). Must be set together with
+    /// ExtractorPredicateValue (controller rejects one-set-one-null for
+    /// FileContent rules).</summary>
+    public ScanPredicateType? ExtractorPredicateType { get; set; }
+
+    /// <summary>Right-hand operand for ExtractorPredicateType. Case-insensitive
+    /// for Equals/Contains. NULL when no predicate is configured.</summary>
+    public string? ExtractorPredicateValue { get; set; }
+
     public Severity Severity    { get; set; } = Severity.Medium;
     public string?  Description { get; set; }
     public bool     IsActive    { get; set; } = true;

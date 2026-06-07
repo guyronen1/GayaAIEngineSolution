@@ -132,6 +132,8 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
                 .SetProperty(m => m.ScanTypeId,             job.ScanTypeId)
                 .SetProperty(m => m.LogFolder,              job.LogFolder)
                 .SetProperty(m => m.SearchPatterns,         job.SearchPatterns)
+                .SetProperty(m => m.InputFolder,            job.InputFolder)
+                .SetProperty(m => m.IncludeSubfolders,      job.IncludeSubfolders)
                 .SetProperty(m => m.ConnectionName,         job.ConnectionName)
                 .SetProperty(m => m.LogSourceUrl,           job.LogSourceUrl)
                 .SetProperty(m => m.PollingIntervalSeconds, job.PollingIntervalSeconds)

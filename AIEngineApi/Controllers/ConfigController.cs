@@ -368,6 +368,7 @@ public class ConfigController(
             LogFolder              = req.LogFolder,
             SearchPatterns         = req.SearchPatterns,
             InputFolder            = req.InputFolder,
+            IncludeSubfolders      = req.IncludeSubfolders,
             ConnectionName         = req.ConnectionName,
             LogSourceUrl           = req.LogSourceUrl,
             PollingIntervalSeconds = req.PollingIntervalSeconds,
@@ -404,6 +405,7 @@ public class ConfigController(
         var beforeLogFolder      = job.LogFolder;
         var beforeSearchPatterns = job.SearchPatterns;
         var beforeInputFolder    = job.InputFolder;
+        var beforeIncludeSubfolders = job.IncludeSubfolders;
         var beforeConnectionName = job.ConnectionName;
         var beforeLogSourceUrl   = job.LogSourceUrl;
         var beforePollingInterval= job.PollingIntervalSeconds;
@@ -417,6 +419,7 @@ public class ConfigController(
         job.LogFolder              = req.LogFolder;
         job.SearchPatterns         = req.SearchPatterns;
         job.InputFolder            = req.InputFolder;
+        job.IncludeSubfolders      = req.IncludeSubfolders;
         job.ConnectionName         = req.ConnectionName;
         job.LogSourceUrl           = req.LogSourceUrl;
         job.PollingIntervalSeconds = req.PollingIntervalSeconds;
@@ -433,6 +436,7 @@ public class ConfigController(
             ("LogFolder",              beforeLogFolder,       job.LogFolder),
             ("SearchPatterns",         beforeSearchPatterns,  job.SearchPatterns),
             ("InputFolder",            beforeInputFolder,     job.InputFolder),
+            ("IncludeSubfolders",      beforeIncludeSubfolders, job.IncludeSubfolders),
             ("ConnectionName",         beforeConnectionName,  job.ConnectionName),
             ("LogSourceUrl",           beforeLogSourceUrl,    job.LogSourceUrl),
             ("PollingIntervalSeconds", beforePollingInterval, job.PollingIntervalSeconds),
@@ -475,16 +479,69 @@ public class ConfigController(
 
     // ── Scan Check Rules ─────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Maps the FileContent-only fields onto the rule and validates them.
+    /// Scoped to CheckType=FileContent — for every other CheckType the five
+    /// fields are nulled (they're meaningless) and no validation runs, so
+    /// existing FS/DB/API rule types are untouched. Returns a 400 IActionResult
+    /// on inconsistent config, else null.
+    /// </summary>
+    private IActionResult? ApplyAndValidateFileContent(UpsertScanCheckRuleRequest req, ScanCheckRule rule, CheckType checkType)
+    {
+        if (checkType != CheckType.FileContent)
+        {
+            rule.ExtractorType           = null;
+            rule.ExtractorLocator        = null;
+            rule.IdentifierLocator       = null;
+            rule.ExtractorPredicateType  = null;
+            rule.ExtractorPredicateValue = null;
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(req.ExtractorType) ||
+            !Enum.TryParse<FileFormat>(req.ExtractorType, ignoreCase: true, out var fmt))
+            return BadRequest(new { error = "ExtractorTypeRequired",
+                message = "FileContent rules require a valid ExtractorType (e.g. 'Xml')." });
+
+        var hasPredType = !string.IsNullOrWhiteSpace(req.ExtractorPredicateType);
+        var hasPredVal  = !string.IsNullOrWhiteSpace(req.ExtractorPredicateValue);
+        if (hasPredType != hasPredVal)
+            return BadRequest(new { error = "PredicateIncomplete",
+                message = "Set both ExtractorPredicateType and ExtractorPredicateValue, or neither." });
+
+        ScanPredicateType? predType = null;
+        if (hasPredType)
+        {
+            if (!Enum.TryParse<ScanPredicateType>(req.ExtractorPredicateType, ignoreCase: true, out var pt))
+                return BadRequest(new { error = "PredicateIncomplete",
+                    message = $"Unknown ExtractorPredicateType '{req.ExtractorPredicateType}'. Use Equals, NotEquals, Contains, or NotContains." });
+            predType = pt;
+
+            if (string.IsNullOrWhiteSpace(req.ExtractorLocator))
+                return BadRequest(new { error = "PredicateRequiresLocator",
+                    message = "A predicate needs an ExtractorLocator to extract the value it tests." });
+        }
+
+        rule.ExtractorType           = fmt;
+        rule.ExtractorLocator        = req.ExtractorLocator;
+        rule.IdentifierLocator       = req.IdentifierLocator;
+        rule.ExtractorPredicateType  = predType;
+        rule.ExtractorPredicateValue = hasPredVal ? req.ExtractorPredicateValue : null;
+        return null;
+    }
+
     [HttpPost("monitored-jobs/{jobId:int}/scan-rules")]
     public async Task<IActionResult> CreateScanRule(int jobId, [FromBody] UpsertScanCheckRuleRequest req, CancellationToken ct)
     {
         if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
+        var checkType = Enum.Parse<CheckType>(req.CheckType);
+
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = new ScanCheckRule
         {
             MonitoredJobId   = jobId,
-            CheckType        = Enum.Parse<CheckType>(req.CheckType),
+            CheckType        = checkType,
             SourceTable      = req.SourceTable,
             TargetField      = req.TargetField,
             MinValue         = req.MinValue,
@@ -498,6 +555,8 @@ public class ConfigController(
             Description      = req.Description,
             IsActive         = true,
         };
+        if (ApplyAndValidateFileContent(req, rule, checkType) is { } fcError) return fcError;
+
         db.ScanCheckRules.Add(rule);
         await db.SaveChangesAsync(ct);
 
@@ -531,11 +590,17 @@ public class ConfigController(
         var beforeSourceId         = rule.SourceIdColumn;
         var beforeFilePathColumn   = rule.FilePathColumn;
         var beforeInputPathPattern = rule.InputPathPattern;
+        var beforeExtractorType    = rule.ExtractorType;
+        var beforeExtractorLocator = rule.ExtractorLocator;
+        var beforeIdentifierLocator= rule.IdentifierLocator;
+        var beforePredicateType    = rule.ExtractorPredicateType;
+        var beforePredicateValue   = rule.ExtractorPredicateValue;
         var beforeSeverity         = rule.Severity;
         var beforeDescription      = rule.Description;
         var beforeIsActive         = rule.IsActive;
 
-        rule.CheckType        = Enum.Parse<CheckType>(req.CheckType);
+        var checkType = Enum.Parse<CheckType>(req.CheckType);
+        rule.CheckType        = checkType;
         rule.SourceTable      = req.SourceTable;
         rule.TargetField      = req.TargetField;
         rule.MinValue         = req.MinValue;
@@ -548,6 +613,7 @@ public class ConfigController(
         rule.Severity         = Enum.Parse<Severity>(req.Severity);
         rule.Description      = req.Description;
         rule.IsActive         = req.IsActive;
+        if (ApplyAndValidateFileContent(req, rule, checkType) is { } fcError) return fcError;
 
         await db.SaveChangesAsync(ct);
 
@@ -562,6 +628,11 @@ public class ConfigController(
             ("SourceIdColumn",   beforeSourceId,         rule.SourceIdColumn),
             ("FilePathColumn",   beforeFilePathColumn,   rule.FilePathColumn),
             ("InputPathPattern", beforeInputPathPattern, rule.InputPathPattern),
+            ("ExtractorType",    beforeExtractorType,    rule.ExtractorType),
+            ("ExtractorLocator", beforeExtractorLocator, rule.ExtractorLocator),
+            ("IdentifierLocator",beforeIdentifierLocator,rule.IdentifierLocator),
+            ("ExtractorPredicateType",  beforePredicateType,  rule.ExtractorPredicateType),
+            ("ExtractorPredicateValue", beforePredicateValue, rule.ExtractorPredicateValue),
             ("Severity",         beforeSeverity,         rule.Severity),
             ("Description",      beforeDescription,      rule.Description),
             ("IsActive",         beforeIsActive,         rule.IsActive));
@@ -1220,7 +1291,9 @@ public sealed record UpsertMonitoredJobRequest(
     string  OperatorId,
     /// <summary>Optional base folder for relative InputPathPattern captures.
     /// FS-scan jobs only; ignored when the regex captures an absolute path.</summary>
-    string? InputFolder = null);
+    string? InputFolder = null,
+    /// <summary>FileContent scans only — recurse into subdirectories of LogFolder.</summary>
+    bool    IncludeSubfolders = false);
 
 public sealed record UpsertScanCheckRuleRequest(
     string   CheckType,
@@ -1240,7 +1313,21 @@ public sealed record UpsertScanCheckRuleRequest(
     string?  FilePathColumn   = null,
     /// <summary>FS scans only — regex with capture group #1 = input file path
     /// extracted from the matching error line. Null = no extraction.</summary>
-    string?  InputPathPattern = null);
+    string?  InputPathPattern = null,
+    // ── FileContent scans only (CheckType=FileContent) ──────────────────────────
+    /// <summary>Extractor/format name, e.g. "Xml". Required for FileContent rules.</summary>
+    string?  ExtractorType           = null,
+    /// <summary>Format-specific address of the value to test (XPath for XML).
+    /// Null = filename match alone is the failure signal.</summary>
+    string?  ExtractorLocator        = null,
+    /// <summary>Format-specific address of the natural key for SourceId (XPath
+    /// for XML). Null = fall back to filename without extension.</summary>
+    string?  IdentifierLocator       = null,
+    /// <summary>Predicate over the extracted value: Equals/NotEquals/Contains/
+    /// NotContains. Null = no predicate (filename match fires unconditionally).</summary>
+    string?  ExtractorPredicateType  = null,
+    /// <summary>Right-hand operand for the predicate. Required with a predicate type.</summary>
+    string?  ExtractorPredicateValue = null);
 
 public sealed record UpsertClassificationRuleRequest(
     int     JobTypeId,

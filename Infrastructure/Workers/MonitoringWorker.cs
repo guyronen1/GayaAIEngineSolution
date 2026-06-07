@@ -119,6 +119,7 @@ public sealed class MonitoringWorker(
         var pollingIntervalSeconds = 300;
         var startedAt = DateTime.Now;
         var failures = 0; var classifications = 0; var recommendations = 0;
+        var identifierExtractionFailures = 0; var oversizeFileSkips = 0;
 
         try
         {
@@ -150,6 +151,8 @@ public sealed class MonitoringWorker(
             failures        = result.FailuresDetected;
             classifications = result.Classifications;
             recommendations = result.Recommendations;
+            identifierExtractionFailures = result.IdentifierExtractionFailures;
+            oversizeFileSkips            = result.OversizeFileSkips;
 
             logger.LogInformation(
                 "MonitoredJob '{Name}' [{ScanType}]: {Failures} failures, " +
@@ -211,6 +214,8 @@ public sealed class MonitoringWorker(
                     FailuresDetected = failures,
                     Classifications  = classifications,
                     Recommendations  = recommendations,
+                    IdentifierExtractionFailures = identifierExtractionFailures,
+                    OversizeFileSkips            = oversizeFileSkips,
                 }, hostCt);
             }
             catch (Exception ex)
