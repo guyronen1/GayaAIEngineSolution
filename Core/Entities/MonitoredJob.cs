@@ -66,6 +66,10 @@ public class MonitoredJob
     // ── Navigation ────────────────────────────────────────────────────────────
     public JobType? JobType { get; set; }
 
+    /// <summary>Tier 2.5: typed observation points within this job (one per
+    /// ScanType + config). Backfilled to a single source per job in phase (a).</summary>
+    public ICollection<ScanSource>       ScanSources    { get; set; } = [];
+
     /// <summary>What to detect during each scan — one rule per check.</summary>
     public ICollection<ScanCheckRule>    ScanCheckRules { get; set; } = [];
 

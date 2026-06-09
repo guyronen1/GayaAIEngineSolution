@@ -11,6 +11,8 @@ public class ScanContentWatermark
 {
     public int      WatermarkId    { get; set; }
     public int      MonitoredJobId { get; set; }
+    /// <summary>Tier 2.5: owning ScanSource (nullable during phase-(a) backfill).</summary>
+    public int?     ScanSourceId   { get; set; }
     public required string FilePath { get; set; }
 
     /// <summary>When MAIA last processed this file.</summary>
@@ -21,4 +23,5 @@ public class ScanContentWatermark
     public DateTime LastModifiedAt { get; set; }
 
     public MonitoredJob? MonitoredJob { get; set; }
+    public ScanSource?   ScanSource   { get; set; }
 }

@@ -9,6 +9,9 @@ public class JobFailure
     public int JobTypeId { get; set; }
     public int? ErrorTypeId { get; set; }
     public int? MonitoredJobId { get; set; }
+    /// <summary>Tier 2.5: the ScanSource that produced this failure. Nullable
+    /// (orphan failures with no MonitoredJobId stay null; backfilled otherwise).</summary>
+    public int? ScanSourceId { get; set; }
     public string? StepName { get; set; }
     public string? SourceId { get; set; }
     public string? ErrorMessage { get; set; }
@@ -33,6 +36,7 @@ public class JobFailure
     public JobType? JobType { get; set; }
     public ErrorType? ErrorType { get; set; }
     public MonitoredJob? MonitoredJob { get; set; }
+    public ScanSource? ScanSource { get; set; }
     public ICollection<AiRecommendation> Recommendations { get; set; } = [];
     public ICollection<FixExecutionLog> FixExecutionLogs { get; set; } = [];
     public ICollection<AuditLog> AuditLogs { get; set; } = [];

@@ -11,6 +11,12 @@ public class ScanCheckRule
     public int CheckRuleId    { get; set; }
     public int MonitoredJobId { get; set; }
 
+    /// <summary>Tier 2.5: the ScanSource this rule belongs to. Nullable during the
+    /// phase-(a) transition (backfilled to the job's singleton source); becomes the
+    /// primary parent once the worker reads sources. MonitoredJobId stays for now.</summary>
+    public int? ScanSourceId { get; set; }
+    public ScanSource? ScanSource { get; set; }
+
     public CheckType CheckType { get; set; }
 
     /// <summary>SQL table to query for ColumnRange checks, e.g. "dbo.Orders".</summary>

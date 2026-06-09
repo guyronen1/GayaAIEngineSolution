@@ -19,6 +19,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
     public DbSet<MonitoredJob>        MonitoredJobs       => Set<MonitoredJob>();
     public DbSet<MonitoredJobRule>    MonitoredJobRules   => Set<MonitoredJobRule>();
     public DbSet<ScanTypeDefinition>  ScanTypes           => Set<ScanTypeDefinition>();
+    public DbSet<ScanSource>          ScanSources         => Set<ScanSource>();
     public DbSet<ScanCheckRule>       ScanCheckRules      => Set<ScanCheckRule>();
     public DbSet<ScanFileWatermark>   ScanFileWatermarks  => Set<ScanFileWatermark>();
     public DbSet<ScanContentWatermark> ScanContentWatermarks => Set<ScanContentWatermark>();
@@ -39,6 +40,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
         ConfigureFixExecutionLog(mb);
         ConfigureAuditLog(mb);
         ConfigureScanTypeDefinition(mb);
+        ConfigureScanSource(mb);
         ConfigureScanCheckRule(mb);
         ConfigureScanFileWatermark(mb);
         ConfigureScanContentWatermark(mb);
@@ -107,6 +109,11 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
                 .WithMany(m => m.Failures)
                 .HasForeignKey(j => j.MonitoredJobId)
                 .OnDelete(DeleteBehavior.SetNull);
+
+            e.HasOne(j => j.ScanSource)
+                .WithMany()
+                .HasForeignKey(j => j.ScanSourceId)
+                .OnDelete(DeleteBehavior.NoAction);
         });
     }
 
@@ -357,6 +364,36 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
         });
     }
 
+    private static void ConfigureScanSource(ModelBuilder mb)
+    {
+        mb.Entity<ScanSource>(e =>
+        {
+            e.ToTable("ScanSources");
+            e.HasKey(s => s.ScanSourceId);
+            e.Property(s => s.Name).IsRequired().HasMaxLength(200);
+            e.Property(s => s.LogFolder).HasMaxLength(500);
+            e.Property(s => s.SearchPatterns).HasMaxLength(500);
+            e.Property(s => s.InputFolder).HasMaxLength(500);
+            e.Property(s => s.IncludeSubfolders).IsRequired().HasDefaultValue(false);
+            e.Property(s => s.ConnectionName).HasMaxLength(200);
+            e.Property(s => s.LogSourceUrl).HasMaxLength(500);
+            e.Property(s => s.PollingIntervalSeconds).HasDefaultValue(300);
+            e.Property(s => s.IsActive).HasDefaultValue(true);
+
+            e.HasOne(s => s.MonitoredJob)
+                .WithMany(m => m.ScanSources)
+                .HasForeignKey(s => s.MonitoredJobId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            e.HasOne(s => s.ScanTypeDefinition)
+                .WithMany()
+                .HasForeignKey(s => s.ScanTypeId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasIndex(s => s.MonitoredJobId).HasDatabaseName("IX_ScanSources_MonitoredJobId");
+        });
+    }
+
     private static void ConfigureScanCheckRule(ModelBuilder mb)
     {
         mb.Entity<ScanCheckRule>(e =>
@@ -388,6 +425,14 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
                 .WithMany(m => m.ScanCheckRules)
                 .HasForeignKey(r => r.MonitoredJobId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            // Tier 2.5 nullable FK → ScanSource. NoAction: the row is already
+            // cascade-deleted via MonitoredJob, so a 2nd cascade path here would
+            // trip SQL Server's multiple-cascade-paths check.
+            e.HasOne(r => r.ScanSource)
+                .WithMany(s => s.ScanCheckRules)
+                .HasForeignKey(r => r.ScanSourceId)
+                .OnDelete(DeleteBehavior.NoAction);
         });
     }
 
@@ -423,6 +468,11 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
                 .WithMany()
                 .HasForeignKey(w => w.MonitoredJobId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            e.HasOne(w => w.ScanSource)
+                .WithMany()
+                .HasForeignKey(w => w.ScanSourceId)
+                .OnDelete(DeleteBehavior.NoAction);
         });
     }
 
@@ -441,6 +491,11 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
                 .WithMany()
                 .HasForeignKey(w => w.MonitoredJobId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            e.HasOne(w => w.ScanSource)
+                .WithMany()
+                .HasForeignKey(w => w.ScanSourceId)
+                .OnDelete(DeleteBehavior.NoAction);
         });
     }
 
@@ -543,6 +598,17 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
                 .WithMany()
                 .HasForeignKey(r => r.MonitoredJobId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            e.HasOne(r => r.ScanSource)
+                .WithMany()
+                .HasForeignKey(r => r.ScanSourceId)
+                .OnDelete(DeleteBehavior.NoAction);
+
+            // Per-source "last scan" lookups (drill-down) once the worker runs
+            // per-source. Complements the per-job index below.
+            e.HasIndex(r => new { r.ScanSourceId, r.StartedAt })
+                .HasDatabaseName("IX_ScanRunHistory_Source_StartedAt")
+                .IsDescending(false, true);
 
             // Covers "last N runs of job X" — no bookmark lookups for the columns the
             // /scan-runs endpoint surfaces.
