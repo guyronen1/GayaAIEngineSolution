@@ -32,5 +32,10 @@ public class ScanRunHistory
     /// exceeded the 5MB extraction cap. 0 for other scan types.</summary>
     public int      OversizeFileSkips { get; set; }
 
+    /// <summary>FileContent scans — count of rules skipped because a predicate was
+    /// set but the ExtractorLocator yielded no value to test (value absent or
+    /// unparseable in the file). 0 for other scan types.</summary>
+    public int      PredicateUnevaluableSkips { get; set; }
+
     public MonitoredJob? MonitoredJob { get; set; }
 }

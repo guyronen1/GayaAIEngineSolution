@@ -72,7 +72,12 @@ public class UnconfiguredController(
         // execution time, so the gap list agrees with what actually fails.
         var recsQ = db.AIRecommendations
             .Join(db.JobFailures, r => r.FailureId, f => f.FailureId, (r, f) => new { r, f })
-            .Where(x => !db.FixPolicyRules.Any(p => p.Enabled
+            // Only OPEN failures are real gaps — a Resolved / AwaitingManualAction /
+            // ManualRequired failure has already been actioned and needs no policy.
+            // Mirrors Case A's `Status == Failed` discipline (the gap list used to
+            // count resolved failures, so marking one resolved didn't clear it).
+            .Where(x => x.f.Status == JobStatus.Failed
+                     && !db.FixPolicyRules.Any(p => p.Enabled
                           && p.ErrorTypeId == x.r.ErrorTypeId
                           && (p.MonitoredJobId == x.f.MonitoredJobId
                               || (p.MonitoredJobId == null && p.JobTypeId == x.f.JobTypeId))));

@@ -19,5 +19,11 @@
     <ProjectReference Include="..\Core\Core.csproj" />
     <ProjectReference Include="..\Application\Application.csproj" />
     <ProjectReference Include="..\Infrastructure\Infrastructure.csproj" />
+    <!-- API ref + ASP.NET framework: lets integration tests exercise controllers
+         (e.g. UnconfiguredController policy-gap status filtering) directly. -->
+    <ProjectReference Include="..\AIEngineApi\AIEngineAPI.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 </Project>

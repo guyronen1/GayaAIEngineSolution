@@ -23,12 +23,18 @@ namespace AIEngineAPI.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 public class ConfigController(
-    IMonitoredJobRepository        jobRepo,
-    IClassificationRuleRepository  ruleRepo,
-    IAuditRepository               audit,
-    ILogger<ConfigController>      logger,
-    IDbContextFactory<AiDbContext> dbFactory) : ControllerBase
+    IMonitoredJobRepository           jobRepo,
+    IClassificationRuleRepository     ruleRepo,
+    IAuditRepository                  audit,
+    ILogger<ConfigController>         logger,
+    IDbContextFactory<AiDbContext>    dbFactory,
+    IEnumerable<IFileContentExtractor> extractors) : ControllerBase
 {
+    // FileContent extractors keyed by format — used to validate a rule's
+    // locator syntax at save time (each extractor owns its locator grammar).
+    private readonly Dictionary<FileFormat, IFileContentExtractor> _extractors =
+        extractors.ToDictionary(e => e.Format);
+
     // ── Audit helpers ────────────────────────────────────────────────────────
 
     /// <summary>
@@ -520,6 +526,23 @@ public class ConfigController(
             if (string.IsNullOrWhiteSpace(req.ExtractorLocator))
                 return BadRequest(new { error = "PredicateRequiresLocator",
                     message = "A predicate needs an ExtractorLocator to extract the value it tests." });
+        }
+
+        // Locator syntax check — the chosen extractor validates its own grammar
+        // (XPath for XML). Rejects a malformed locator (e.g. `\\` instead of `//`)
+        // at save instead of letting it fail silently at scan time.
+        if (_extractors.TryGetValue(fmt, out var extractor))
+        {
+            foreach (var (field, loc) in new[]
+                     {
+                         ("ExtractorLocator",  req.ExtractorLocator),
+                         ("IdentifierLocator", req.IdentifierLocator),
+                     })
+            {
+                if (!string.IsNullOrWhiteSpace(loc) && extractor.ValidateLocator(loc) is { } reason)
+                    return BadRequest(new { error = "InvalidLocator",
+                        message = $"{field} is {reason}" });
+            }
         }
 
         rule.ExtractorType           = fmt;

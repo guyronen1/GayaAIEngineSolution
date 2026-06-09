@@ -19,5 +19,11 @@ public sealed class ScanResult
     /// extraction size cap. Copied onto ScanRunHistory by the worker.</summary>
     public int               OversizeFileSkips { get; set; }
 
+    /// <summary>FileContent scans — rules skipped because a predicate was set but
+    /// the ExtractorLocator yielded no value to test (valid locator, value absent
+    /// in the file, or unparseable). Surfaces "the predicate couldn't be
+    /// evaluated" rather than failing silently. Copied onto ScanRunHistory.</summary>
+    public int               PredicateUnevaluableSkips { get; set; }
+
     public string?           Detail           { get; set; }
 }

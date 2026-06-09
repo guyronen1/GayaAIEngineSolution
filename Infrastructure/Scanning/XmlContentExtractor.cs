@@ -37,6 +37,22 @@ public sealed class XmlContentExtractor(ILogger<XmlContentExtractor> logger) : I
 
     public FileFormat Format => FileFormat.Xml;
 
+    /// <summary>Compile the locator as XPath; null = valid, else the reason.
+    /// Empty is valid ("no locator"). Catches the `\\`-vs-`//` typo at save.</summary>
+    public string? ValidateLocator(string locator)
+    {
+        if (string.IsNullOrWhiteSpace(locator)) return null;
+        try
+        {
+            XPathExpression.Compile(locator);
+            return null;
+        }
+        catch (Exception ex) when (ex is XPathException or ArgumentException)
+        {
+            return $"not valid XPath ({ex.Message})";
+        }
+    }
+
     public Task<string?> ExtractAsync(string filePath, string locator, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();

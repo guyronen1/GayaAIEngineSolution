@@ -537,6 +537,7 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.Property(r => r.Error).HasMaxLength(2000);
             e.Property(r => r.IdentifierExtractionFailures).IsRequired().HasDefaultValue(0);
             e.Property(r => r.OversizeFileSkips).IsRequired().HasDefaultValue(0);
+            e.Property(r => r.PredicateUnevaluableSkips).IsRequired().HasDefaultValue(0);
 
             e.HasOne(r => r.MonitoredJob)
                 .WithMany()

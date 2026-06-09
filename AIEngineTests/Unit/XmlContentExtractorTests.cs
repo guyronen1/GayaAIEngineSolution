@@ -178,4 +178,24 @@ public class XmlContentExtractorTests
         var xml = "<file><code>FINE</code></file>";
         Assert.Equal("FINE", await Extract(xml, "/file/code"));
     }
+
+    // ── Locator syntax validation (save-time check) ─────────────────────────────
+
+    [Theory]
+    [InlineData("/file/status/code")]
+    [InlineData("//KOD-SHGIHA-BERAMAT-RESHUMA")]
+    [InlineData("/order/@id")]
+    [InlineData("string(/file/header/invoiceId)")]
+    [InlineData("")]            // empty = "no locator" = valid
+    [InlineData("   ")]
+    public void ValidateLocator_AcceptsValidXPath(string locator)
+        => Assert.Null(Extractor.ValidateLocator(locator));
+
+    [Theory]
+    [InlineData("\\\\KOD-SHGIHA-BERAMAT-RESHUMA")]   // the real `\\` vs `//` typo
+    [InlineData("\\MISPAR-MISLAKA")]
+    [InlineData("/file/[[[bad")]
+    [InlineData("///")]
+    public void ValidateLocator_RejectsMalformedXPath(string locator)
+        => Assert.NotNull(Extractor.ValidateLocator(locator));
 }

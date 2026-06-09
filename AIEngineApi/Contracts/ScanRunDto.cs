@@ -14,7 +14,13 @@ public sealed record ScanRunDto(
     string?  Error,
     int      FailuresDetected,
     int      Classifications,
-    int      Recommendations)
+    int      Recommendations,
+    // FileContent diagnostics — 0 for other scan types. Surfaced so a
+    // misconfigured locator / missing value / oversize file is visible in
+    // scan history instead of only in the log file.
+    int      IdentifierExtractionFailures,
+    int      OversizeFileSkips,
+    int      PredicateUnevaluableSkips)
 {
     public static ScanRunDto From(ScanRunHistory r) => new(
         r.ScanRunId,
@@ -28,5 +34,8 @@ public sealed record ScanRunDto(
         r.Error,
         r.FailuresDetected,
         r.Classifications,
-        r.Recommendations);
+        r.Recommendations,
+        r.IdentifierExtractionFailures,
+        r.OversizeFileSkips,
+        r.PredicateUnevaluableSkips);
 }

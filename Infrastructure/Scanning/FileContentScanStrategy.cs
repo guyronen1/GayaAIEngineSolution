@@ -132,6 +132,10 @@ public sealed class FileContentScanStrategy(
                         if (primary is null)
                         {
                             // Predicate set but value not extractable — can't decide; skip.
+                            // Counted on ScanRunHistory so a locator that matches
+                            // nothing (or a file missing the expected element)
+                            // surfaces instead of failing silently.
+                            result.PredicateUnevaluableSkips++;
                             logger.LogWarning(
                                 "FileContentScan '{Job}': rule {RuleId} predicate set but value not extractable from {File} — skipping",
                                 job.Name, rule.CheckRuleId, fileName);

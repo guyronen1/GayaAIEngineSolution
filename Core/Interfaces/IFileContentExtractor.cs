@@ -30,6 +30,17 @@ public interface IFileContentExtractor
     /// </para>
     /// </summary>
     Task<string?> ExtractAsync(string filePath, string locator, CancellationToken ct = default);
+
+    /// <summary>
+    /// Validate a locator's <em>syntax</em> (not against any file) for config
+    /// save-time checks. Returns <c>null</c> when the locator is valid (or empty
+    /// — empty means "no locator", which is allowed), else a short human-readable
+    /// reason. The extractor owns its locator grammar, so it owns this check —
+    /// e.g. the XML extractor compiles the string as XPath. Lets ConfigController
+    /// reject a malformed locator (a `\\`-vs-`//` typo) at save instead of having
+    /// it fail silently at scan time.
+    /// </summary>
+    string? ValidateLocator(string locator);
 }
 
 /// <summary>

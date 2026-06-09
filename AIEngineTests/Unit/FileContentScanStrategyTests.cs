@@ -259,6 +259,24 @@ public class FileContentScanStrategyTests
         Assert.Equal(1, result.IdentifierExtractionFailures);
     }
 
+    // ── Predicate set but value not extractable → counted, no failure ────────────
+
+    [Fact]
+    public async Task PredicateValueNotExtractable_CountsAndDoesNotFire()
+    {
+        using var dir = new TempDir();
+        dir.Write("data.xml", InvoiceError);   // has /file/status/code, NOT /file/status/missing
+
+        var h = new Harness();
+        // Valid XPath that matches nothing in the file → predicate can't be evaluated.
+        var rule = FcRule(1, "*.xml",
+            locator: "/file/status/missing", predType: ScanPredicateType.Equals, predVal: "ERROR");
+        var result = await h.Strategy.ScanAsync(Job(dir.Path, false, rule));
+
+        Assert.Equal(0, result.FailuresDetected);
+        Assert.Equal(1, result.PredicateUnevaluableSkips);
+    }
+
     // ── Oversize skip + counter + watermark still written ────────────────────────
 
     [Fact]
