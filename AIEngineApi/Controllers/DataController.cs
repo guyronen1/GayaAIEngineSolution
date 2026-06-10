@@ -291,6 +291,8 @@ public class DataController(
             .Select(m => new
             {
                 monitoredJobId = m.MonitoredJobId,
+                // Job-level rollup (most recent run across all sources) — drives the
+                // compact row's badge/duration/counts.
                 lastScan = db.ScanRunHistory
                     .Where(h => h.MonitoredJobId == m.MonitoredJobId)
                     .OrderByDescending(h => h.StartedAt)
@@ -304,6 +306,32 @@ public class DataController(
                         recommendations  = h.Recommendations,
                     })
                     .FirstOrDefault(),
+                // Tier 2.5 (d2e): per-source last-scan breakdown for the drill-down.
+                // Worker writes one ScanRunHistory row per source per tick, so the
+                // latest row per ScanSourceId is that source's last scan.
+                sources = m.ScanSources
+                    .Where(s => s.IsActive)
+                    .OrderBy(s => s.ScanSourceId)
+                    .Select(s => new
+                    {
+                        scanSourceId = s.ScanSourceId,
+                        name         = s.Name,
+                        scanTypeName = s.ScanTypeDefinition != null ? s.ScanTypeDefinition.Name : "Unknown",
+                        lastScan = db.ScanRunHistory
+                            .Where(h => h.ScanSourceId == s.ScanSourceId)
+                            .OrderByDescending(h => h.StartedAt)
+                            .Select(h => new
+                            {
+                                completedAt      = h.CompletedAt,
+                                durationMs       = h.DurationMs,
+                                outcome          = h.Outcome.ToString(),
+                                failuresDetected = h.FailuresDetected,
+                                classifications  = h.Classifications,
+                                recommendations  = h.Recommendations,
+                            })
+                            .FirstOrDefault(),
+                    })
+                    .ToList(),
             })
             .ToListAsync(ct);
 
