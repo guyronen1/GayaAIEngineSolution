@@ -360,6 +360,18 @@ public class ConfigController(
         return Ok(jobs.Select(MonitoredJobDto.From));
     }
 
+    /// <summary>Full operational picture of one job for the dedicated config screen
+    /// (Tier 2.5 d2): active sources with their active rules, classification rules,
+    /// fix policies. One round-trip. (Lease state isn't included — the config screen
+    /// doesn't render it; the dashboard polls worker-status for that.)</summary>
+    [HttpGet("monitored-jobs/{id:int}")]
+    public async Task<IActionResult> GetJob(int id, CancellationToken ct)
+    {
+        var job = await jobRepo.GetByIdAsync(id, ct);
+        if (job is null) return NotFound();
+        return Ok(MonitoredJobDto.From(job));
+    }
+
     [HttpPost("monitored-jobs")]
     public async Task<IActionResult> CreateJob([FromBody] UpsertMonitoredJobRequest req, CancellationToken ct)
     {
