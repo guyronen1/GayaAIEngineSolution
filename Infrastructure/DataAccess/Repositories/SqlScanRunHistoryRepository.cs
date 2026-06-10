@@ -19,6 +19,7 @@ public sealed class SqlScanRunHistoryRepository(IDbContextFactory<AiDbContext> f
 
     public async Task<PagedResult<ScanRunHistory>> GetPagedAsync(
         int? monitoredJobId,
+        int? scanSourceId,
         JobRunOutcome? outcome,
         DateTime? fromDate,
         DateTime? toDate,
@@ -27,9 +28,14 @@ public sealed class SqlScanRunHistoryRepository(IDbContextFactory<AiDbContext> f
         CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        IQueryable<ScanRunHistory> q = db.ScanRunHistory.Include(r => r.MonitoredJob);
+        // Include the source so the DTO can show which source the run scanned
+        // (Tier 2.5). MonitoredJob still included for the job name.
+        IQueryable<ScanRunHistory> q = db.ScanRunHistory
+            .Include(r => r.MonitoredJob)
+            .Include(r => r.ScanSource);
 
         if (monitoredJobId.HasValue) q = q.Where(r => r.MonitoredJobId == monitoredJobId.Value);
+        if (scanSourceId.HasValue)   q = q.Where(r => r.ScanSourceId == scanSourceId.Value);
         if (outcome.HasValue)        q = q.Where(r => r.Outcome == outcome.Value);
         if (fromDate.HasValue)       q = q.Where(r => r.StartedAt >= fromDate.Value);
         if (toDate.HasValue)         q = q.Where(r => r.StartedAt <= toDate.Value);

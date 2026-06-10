@@ -6,6 +6,9 @@ public sealed record ScanRunDto(
     int      ScanRunId,
     int      MonitoredJobId,
     string?  MonitoredJobName,
+    // Tier 2.5: which source this run scanned (null on pre-migration rows).
+    int?     ScanSourceId,
+    string?  ScanSourceName,
     string   LeasedBy,
     DateTime StartedAt,
     DateTime CompletedAt,
@@ -26,6 +29,8 @@ public sealed record ScanRunDto(
         r.ScanRunId,
         r.MonitoredJobId,
         r.MonitoredJob?.Name,
+        r.ScanSourceId,
+        r.ScanSource?.Name,
         r.LeasedBy,
         r.StartedAt,
         r.CompletedAt,

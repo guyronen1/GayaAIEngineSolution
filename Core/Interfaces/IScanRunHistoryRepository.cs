@@ -10,6 +10,7 @@ public interface IScanRunHistoryRepository
 
     Task<PagedResult<ScanRunHistory>> GetPagedAsync(
         int?           monitoredJobId,
+        int?           scanSourceId,
         JobRunOutcome? outcome,
         DateTime?      fromDate,
         DateTime?      toDate,

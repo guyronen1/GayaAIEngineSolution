@@ -691,6 +691,7 @@ public class DataController(
     [HttpGet("scan-runs")]
     public async Task<IActionResult> GetScanRuns(
         [FromQuery] int?      monitoredJobId,
+        [FromQuery] int?      scanSourceId,
         [FromQuery] string?   outcome,
         [FromQuery] DateTime? fromDate,
         [FromQuery] DateTime? toDate,
@@ -711,7 +712,7 @@ public class DataController(
         }
 
         var paged = await scanRuns.GetPagedAsync(
-            monitoredJobId, outcomeFilter, fromDate, toDate, page, pageSize, ct);
+            monitoredJobId, scanSourceId, outcomeFilter, fromDate, toDate, page, pageSize, ct);
         var dtos  = paged.Items.Select(ScanRunDto.From).ToList();
         return Ok(new { paged.TotalCount, paged.TotalPages, paged.Page, paged.PageSize, Items = dtos });
     }

@@ -561,9 +561,26 @@ public class ConfigController(
         var checkType = Enum.Parse<CheckType>(req.CheckType);
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
+
+        // Transitional (Tier 2.5): a rule must belong to a ScanSource, or the worker
+        // (which scans per source) never loads it. The current UI still posts here
+        // job-scoped, so attach to the job's single active source. With 0 or >1
+        // sources it's ambiguous → 400 directing to the per-source endpoint. Removed
+        // once the new config UI (phase d2) posts to /scan-sources/{id}/scan-rules.
+        var activeSourceIds = await db.ScanSources
+            .Where(s => s.MonitoredJobId == jobId && s.IsActive)
+            .Select(s => s.ScanSourceId)
+            .ToListAsync(ct);
+        if (activeSourceIds.Count != 1)
+            return BadRequest(new { error = "AmbiguousSourceForRule",
+                message = activeSourceIds.Count == 0
+                    ? "This job has no active scan source. Add a source first, then add rules to it."
+                    : "This job has multiple sources. Add the rule to a specific source via /config/scan-sources/{id}/scan-rules." });
+
         var rule = new ScanCheckRule
         {
             MonitoredJobId   = jobId,
+            ScanSourceId     = activeSourceIds[0],
             CheckType        = checkType,
             SourceTable      = req.SourceTable,
             TargetField      = req.TargetField,
@@ -694,6 +711,214 @@ public class ConfigController(
             ct: ct);
 
         return NoContent();
+    }
+
+    // ── Scan Sources (Tier 2.5) ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Validates a source's config against its ScanType + cross-source constraints.
+    /// Returns a 400 IActionResult on the first violation, else null.
+    ///   • LogFolderRequired / ConnectionNameRequired / LogSourceUrlRequired — the
+    ///     config field the source's type needs.
+    ///   • IncludeSubfoldersInvalidForType — recursion only applies to file types.
+    ///   • SourceNameRequired / SourceNameDuplicate — name present + unique among the
+    ///     job's ACTIVE sources (case-insensitive via the DB's CI collation).
+    ///   • UnknownScanType — ScanTypeId not in ScanTypes.
+    ///   • SourceFolderConflict — two ACTIVE FS/FileContent sources of one job may not
+    ///     share a LogFolder: watermarks are keyed (MonitoredJobId, FilePath), NOT
+    ///     (ScanSourceId, FilePath), so they'd fight over the same watermark rows
+    ///     (silent data loss). Guard lifts when watermarks are re-keyed to the source.
+    /// </summary>
+    private async Task<IActionResult?> ValidateScanSourceAsync(
+        AiDbContext db, int jobId, UpsertScanSourceRequest req, int? existingSourceId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.Name))
+            return BadRequest(new { error = "SourceNameRequired", message = "Source Name is required." });
+
+        var st = await db.ScanTypes.FirstOrDefaultAsync(s => s.ScanTypeId == req.ScanTypeId, ct);
+        if (st is null)
+            return BadRequest(new { error = "UnknownScanType", message = $"ScanTypeId {req.ScanTypeId} not found." });
+        var scanType   = Enum.Parse<ScanType>(st.Name);
+        var isFileBased = scanType is ScanType.FileSystem or ScanType.FileContent;
+
+        if (isFileBased && string.IsNullOrWhiteSpace(req.LogFolder))
+            return BadRequest(new { error = "LogFolderRequired", message = $"{scanType} sources require a Log Folder." });
+        if (scanType == ScanType.Database && string.IsNullOrWhiteSpace(req.ConnectionName))
+            return BadRequest(new { error = "ConnectionNameRequired", message = "Database sources require a Connection Name." });
+        if (scanType == ScanType.ApiEndpoint && string.IsNullOrWhiteSpace(req.LogSourceUrl))
+            return BadRequest(new { error = "LogSourceUrlRequired", message = "ApiEndpoint sources require a URL." });
+        if (req.IncludeSubfolders && !isFileBased)
+            return BadRequest(new { error = "IncludeSubfoldersInvalidForType", message = "Include Subfolders applies only to FileSystem / FileContent sources." });
+
+        var selfId = existingSourceId ?? 0;
+        var name   = req.Name.Trim();
+        if (await db.ScanSources.AnyAsync(s =>
+                s.MonitoredJobId == jobId && s.IsActive && s.ScanSourceId != selfId && s.Name == name, ct))
+            return BadRequest(new { error = "SourceNameDuplicate", message = $"This job already has an active source named '{name}'." });
+
+        if (isFileBased && !string.IsNullOrWhiteSpace(req.LogFolder))
+        {
+            var folder = req.LogFolder.Trim().ToLower();
+            var fileBasedTypeIds = await db.ScanTypes
+                .Where(t => t.Name == "FileSystem" || t.Name == "FileContent")
+                .Select(t => t.ScanTypeId).ToListAsync(ct);
+            var conflict = await db.ScanSources.AnyAsync(s =>
+                s.MonitoredJobId == jobId && s.IsActive && s.ScanSourceId != selfId
+                && fileBasedTypeIds.Contains(s.ScanTypeId)
+                && s.LogFolder != null && s.LogFolder.ToLower() == folder, ct);
+            if (conflict)
+                return BadRequest(new { error = "SourceFolderConflict",
+                    message = "Cannot create a second source with the same LogFolder. Add additional rules to the existing source instead, or use a different folder." });
+        }
+
+        return null;
+    }
+
+    [HttpPost("monitored-jobs/{jobId:int}/scan-sources")]
+    public async Task<IActionResult> CreateScanSource(int jobId, [FromBody] UpsertScanSourceRequest req, CancellationToken ct)
+    {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        if (await db.MonitoredJobs.FindAsync([jobId], ct) is null) return NotFound();
+        if (await ValidateScanSourceAsync(db, jobId, req, existingSourceId: null, ct) is { } err) return err;
+
+        var source = new ScanSource
+        {
+            MonitoredJobId    = jobId,
+            Name              = req.Name.Trim(),
+            ScanTypeId        = req.ScanTypeId,
+            LogFolder         = req.LogFolder,
+            SearchPatterns    = req.SearchPatterns,
+            InputFolder       = req.InputFolder,
+            IncludeSubfolders = req.IncludeSubfolders,
+            ConnectionName    = req.ConnectionName,
+            LogSourceUrl      = req.LogSourceUrl,
+            IsActive          = true,
+        };
+        db.ScanSources.Add(source);
+        await db.SaveChangesAsync(ct);
+
+        await WriteAuditAsync("ScanSource", source.ScanSourceId.ToString(), "ScanSourceCreated", req.OperatorId,
+            $"Created ScanSource '{source.Name}' for MonitoredJob {jobId} (ScanTypeId={source.ScanTypeId})", ct);
+        return Ok(new { source.ScanSourceId });
+    }
+
+    [HttpPut("scan-sources/{id:int}")]
+    public async Task<IActionResult> UpdateScanSource(int id, [FromBody] UpsertScanSourceRequest req, CancellationToken ct)
+    {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var source = await db.ScanSources.FindAsync([id], ct);
+        if (source is null) return NotFound();
+
+        if (req.ScanTypeId != source.ScanTypeId)
+            return BadRequest(new { error = "ScanTypeImmutable",
+                message = "A source's ScanType cannot be changed. Delete the source and create a new one." });
+
+        if (await ValidateScanSourceAsync(db, source.MonitoredJobId, req, existingSourceId: id, ct) is { } err) return err;
+
+        var beforeName     = source.Name;
+        var beforeFolder   = source.LogFolder;
+        var beforePatterns = source.SearchPatterns;
+        var beforeInput    = source.InputFolder;
+        var beforeRecurse  = source.IncludeSubfolders;
+        var beforeConn     = source.ConnectionName;
+        var beforeUrl      = source.LogSourceUrl;
+        var beforeActive   = source.IsActive;
+
+        source.Name              = req.Name.Trim();
+        source.LogFolder         = req.LogFolder;
+        source.SearchPatterns    = req.SearchPatterns;
+        source.InputFolder       = req.InputFolder;
+        source.IncludeSubfolders = req.IncludeSubfolders;
+        source.ConnectionName    = req.ConnectionName;
+        source.LogSourceUrl      = req.LogSourceUrl;
+        source.IsActive          = req.IsActive;
+        await db.SaveChangesAsync(ct);
+
+        var diff = BuildDiff(
+            ("Name",              beforeName,     source.Name),
+            ("LogFolder",         beforeFolder,   source.LogFolder),
+            ("SearchPatterns",    beforePatterns, source.SearchPatterns),
+            ("InputFolder",       beforeInput,    source.InputFolder),
+            ("IncludeSubfolders", beforeRecurse,  source.IncludeSubfolders),
+            ("ConnectionName",    beforeConn,     source.ConnectionName),
+            ("LogSourceUrl",      beforeUrl,      source.LogSourceUrl),
+            ("IsActive",          beforeActive,   source.IsActive));
+        await WriteAuditAsync("ScanSource", id.ToString(), "ScanSourceUpdated", req.OperatorId,
+            diff.Length > 0 ? diff : "No changes", ct);
+        return NoContent();
+    }
+
+    [HttpDelete("scan-sources/{id:int}")]
+    public async Task<IActionResult> DeleteScanSource(int id, [FromQuery] string operatorId, CancellationToken ct)
+    {
+        if (MissingOperator(operatorId, out var opErr)) return opErr;
+
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var source = await db.ScanSources
+            .Include(s => s.ScanCheckRules)
+            .FirstOrDefaultAsync(s => s.ScanSourceId == id, ct);
+        if (source is null) return NotFound();
+
+        var name = source.Name; var typeId = source.ScanTypeId;
+        // Soft-delete (matches the codebase pattern; the NoAction FKs block a hard
+        // cascade and JobFailures reference ScanSourceId). Cascade soft-delete to the
+        // source's active rules so none linger as "active under an inactive source".
+        // Watermarks left dormant (the inactive source won't scan); JobFailures keep
+        // their ScanSourceId for drill-down history.
+        source.IsActive = false;
+        var deactivated = 0;
+        foreach (var r in source.ScanCheckRules.Where(r => r.IsActive)) { r.IsActive = false; deactivated++; }
+        await db.SaveChangesAsync(ct);
+
+        await WriteAuditAsync("ScanSource", id.ToString(), "ScanSourceDeleted", operatorId,
+            $"Soft-deleted ScanSource {id} ('{name}', ScanTypeId={typeId}); deactivated {deactivated} rule(s)", ct);
+        return NoContent();
+    }
+
+    /// <summary>Source-scoped scan-rule create (Tier 2.5). The rule's ScanSourceId is
+    /// the source; MonitoredJobId is derived from the source's job (kept populated for
+    /// the migration era). This is the canonical add-rule path now that the worker
+    /// scans per source.</summary>
+    [HttpPost("scan-sources/{sourceId:int}/scan-rules")]
+    public async Task<IActionResult> CreateScanRuleForSource(int sourceId, [FromBody] UpsertScanCheckRuleRequest req, CancellationToken ct)
+    {
+        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
+
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var source = await db.ScanSources.FindAsync([sourceId], ct);
+        if (source is null) return NotFound();
+
+        var checkType = Enum.Parse<CheckType>(req.CheckType);
+        var rule = new ScanCheckRule
+        {
+            MonitoredJobId   = source.MonitoredJobId,
+            ScanSourceId     = sourceId,
+            CheckType        = checkType,
+            SourceTable      = req.SourceTable,
+            TargetField      = req.TargetField,
+            MinValue         = req.MinValue,
+            MaxValue         = req.MaxValue,
+            ExpectedValue    = req.ExpectedValue,
+            WatermarkColumn  = req.WatermarkColumn,
+            SourceIdColumn   = req.SourceIdColumn,
+            FilePathColumn   = req.FilePathColumn,
+            InputPathPattern = req.InputPathPattern,
+            Severity         = Enum.Parse<Severity>(req.Severity),
+            Description      = req.Description,
+            IsActive         = true,
+        };
+        if (ApplyAndValidateFileContent(req, rule, checkType) is { } fcError) return fcError;
+
+        db.ScanCheckRules.Add(rule);
+        await db.SaveChangesAsync(ct);
+
+        await WriteAuditAsync("ScanCheckRule", rule.CheckRuleId.ToString(), "ScanRuleCreated", req.OperatorId,
+            $"Created ScanCheckRule for ScanSource {sourceId} (CheckType={rule.CheckType}, TargetField='{rule.TargetField}', Severity={rule.Severity})", ct);
+        return Ok(new { rule.CheckRuleId });
     }
 
     // ── Per-job Classification Rules ────────────────────────────────────────
@@ -1317,6 +1542,18 @@ public sealed record UpsertMonitoredJobRequest(
     string? InputFolder = null,
     /// <summary>FileContent scans only — recurse into subdirectories of LogFolder.</summary>
     bool    IncludeSubfolders = false);
+
+public sealed record UpsertScanSourceRequest(
+    string  Name,
+    int     ScanTypeId,
+    string  OperatorId,
+    string? LogFolder         = null,
+    string? SearchPatterns    = null,
+    string? InputFolder       = null,
+    bool    IncludeSubfolders = false,
+    string? ConnectionName    = null,
+    string? LogSourceUrl      = null,
+    bool    IsActive          = true);
 
 public sealed record UpsertScanCheckRuleRequest(
     string   CheckType,

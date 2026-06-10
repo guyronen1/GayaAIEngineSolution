@@ -25,6 +25,10 @@ public sealed record MonitoredJobDto(
     DateTime                         CreatedAt,
     IReadOnlyList<ScanCheckRuleDto>  ScanCheckRules,
     IReadOnlyList<RuleOverrideDto>   Rules,
+    // Tier 2.5: typed observation points within the job, each with its own config
+    // + rules. Active sources only (soft-deleted ones are hidden). The legacy
+    // top-level ScanCheckRules stays until the cleanup round removes it.
+    IReadOnlyList<ScanSourceDto>     Sources,
     MonitoredJobLeaseDto?            Lease)
 {
     public static MonitoredJobDto From(MonitoredJob m) => new(
@@ -52,9 +56,48 @@ public sealed record MonitoredJobDto(
             .Where(jr => jr.IsActive && jr.Rule is not null)
             .Select(jr => RuleOverrideDto.From(jr.Rule!))
             .ToList(),
+        m.ScanSources
+            .Where(s => s.IsActive)
+            .OrderBy(s => s.ScanSourceId)
+            .Select(ScanSourceDto.From)
+            .ToList(),
         // Null-safe: schema is 1:1 with cascade delete so Lease should always be
         // present, but treat absence as gray-state in the UI rather than NPE.
         MonitoredJobLeaseDto.From(m.Lease));
+}
+
+public sealed record ScanSourceDto(
+    int       ScanSourceId,
+    int       MonitoredJobId,
+    string    Name,
+    int       ScanTypeId,
+    string    ScanTypeName,
+    string?   LogFolder,
+    string?   SearchPatterns,
+    string?   InputFolder,
+    bool      IncludeSubfolders,
+    string?   ConnectionName,
+    string?   LogSourceUrl,
+    bool      IsActive,
+    IReadOnlyList<ScanCheckRuleDto> ScanCheckRules)
+{
+    public static ScanSourceDto From(ScanSource s) => new(
+        s.ScanSourceId,
+        s.MonitoredJobId,
+        s.Name,
+        s.ScanTypeId,
+        s.ScanTypeDefinition?.Name ?? s.ScanTypeId.ToString(),
+        s.LogFolder,
+        s.SearchPatterns,
+        s.InputFolder,
+        s.IncludeSubfolders,
+        s.ConnectionName,
+        s.LogSourceUrl,
+        s.IsActive,
+        s.ScanCheckRules
+            .Where(r => r.IsActive)
+            .Select(ScanCheckRuleDto.From)
+            .ToList());
 }
 
 public sealed record MonitoredJobLeaseDto(

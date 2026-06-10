@@ -125,7 +125,14 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
             .Include(m => m.ScanCheckRules)
             .Include(m => m.JobRules.Where(jr => jr.IsActive))
                 .ThenInclude(jr => jr.Rule).ThenInclude(r => r!.ErrorType)
+            // Tier 2.5: active sources (+ type + active rules) for the config screen's
+            // Scan Sources section. Active-filtered so soft-deleted sources/rules don't show.
+            .Include(m => m.ScanSources.Where(s => s.IsActive))
+                .ThenInclude(s => s.ScanTypeDefinition)
+            .Include(m => m.ScanSources.Where(s => s.IsActive))
+                .ThenInclude(s => s.ScanCheckRules.Where(r => r.IsActive))
             .OrderBy(m => m.Name)
+            .AsSplitQuery()
             .ToListAsync(ct);
     }
 
