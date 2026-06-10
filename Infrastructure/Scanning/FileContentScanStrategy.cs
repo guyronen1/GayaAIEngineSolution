@@ -36,13 +36,13 @@ public sealed class FileContentScanStrategy(
 
     public ScanType ScanType => ScanType.FileContent;
 
-    public async Task<ScanResult> ScanAsync(MonitoredJob job, CancellationToken ct = default)
+    public async Task<ScanResult> ScanAsync(MonitoredJob job, ScanSource source, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(job.LogFolder))
+        if (string.IsNullOrWhiteSpace(source.LogFolder))
             throw new InvalidOperationException(
-                $"Job '{job.Name}' has no LogFolder configured for FileContent scan.");
+                $"Source '{source.Name}' (job '{job.Name}') has no LogFolder configured for FileContent scan.");
 
-        var rules = job.ScanCheckRules
+        var rules = source.ScanCheckRules
             .Where(r => r.IsActive && r.CheckType == CheckType.FileContent)
             .ToList();
 
@@ -50,29 +50,29 @@ public sealed class FileContentScanStrategy(
         {
             JobName  = job.Name,
             ScanType = ScanType.FileContent,
-            Detail   = $"Folder: {job.LogFolder} | Rules: {rules.Count}" +
-                       (job.IncludeSubfolders ? " | recursive" : ""),
+            Detail   = $"Source: {source.Name} | Folder: {source.LogFolder} | Rules: {rules.Count}" +
+                       (source.IncludeSubfolders ? " | recursive" : ""),
         };
 
         if (rules.Count == 0)
         {
-            logger.LogWarning("FileContentScan '{Job}': no active FileContent rules — nothing to scan", job.Name);
+            logger.LogWarning("FileContentScan '{Job}/{Source}': no active FileContent rules — nothing to scan", job.Name, source.Name);
             return result;
         }
 
-        if (!Directory.Exists(job.LogFolder))
+        if (!Directory.Exists(source.LogFolder))
         {
-            logger.LogWarning("FileContentScan '{Job}': folder not found: {Folder}", job.Name, job.LogFolder);
+            logger.LogWarning("FileContentScan '{Job}/{Source}': folder not found: {Folder}", job.Name, source.Name, source.LogFolder);
             return result;
         }
 
-        var searchOption = job.IncludeSubfolders
+        var searchOption = source.IncludeSubfolders
             ? SearchOption.AllDirectories
             : SearchOption.TopDirectoryOnly;
 
         // No-pattern enumerate (avoid Win32 glob quirks) — filter per-rule in code
         // via the FilenamePattern DSL, identical to FileSystemScanStrategy.
-        var allFiles = Directory.EnumerateFiles(job.LogFolder, "*", searchOption).ToList();
+        var allFiles = Directory.EnumerateFiles(source.LogFolder, "*", searchOption).ToList();
 
         var created = new List<JobFailure>();
 
@@ -165,8 +165,9 @@ public sealed class FileContentScanStrategy(
                     var failure = new JobFailure
                     {
                         JobId          = 0,
-                        JobTypeId      = job.JobTypeId,
+                        JobTypeId      = job.JobTypeId,                  // identity from the job
                         MonitoredJobId = job.MonitoredJobId,
+                        ScanSourceId   = source.ScanSourceId,           // which source produced it
                         StepName       = fileName,                      // matches FS convention
                         SourceId       = sourceId,
                         ErrorMessage   = BuildMessage(rule, primary, fileName),

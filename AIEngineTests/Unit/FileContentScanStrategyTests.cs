@@ -112,6 +112,7 @@ public class FileContentScanStrategyTests
         {
             CheckRuleId             = id,
             MonitoredJobId          = 1,
+            ScanSourceId            = 1,                // rules now belong to the source
             CheckType               = checkType,
             TargetField             = pattern,
             ExtractorType           = format,
@@ -123,12 +124,23 @@ public class FileContentScanStrategyTests
             IsActive                = true,
         };
 
-    private static MonitoredJob Job(string folder, bool recursive, params ScanCheckRule[] rules)
+    // Tier 2.5: the job carries only identity (JobTypeId / MonitoredJobId / Name);
+    // a single shared instance is fine since the strategy never mutates it.
+    private static readonly MonitoredJob TheJob = new()
+    {
+        MonitoredJobId = 1,
+        Name           = "FCJob",
+        JobTypeId      = 1,
+    };
+
+    // The source carries the scan config + the rules. ScanAsync(job, source).
+    private static ScanSource Source(string folder, bool recursive, params ScanCheckRule[] rules)
         => new()
         {
+            ScanSourceId      = 1,
             MonitoredJobId    = 1,
-            Name              = "FCJob",
-            JobTypeId         = 1,
+            Name              = "FileContent",
+            ScanTypeId        = 4,
             LogFolder         = folder,
             IncludeSubfolders = recursive,
             ScanCheckRules    = rules.ToList(),
@@ -152,7 +164,7 @@ public class FileContentScanStrategyTests
 
         var h = new Harness();
         var rule = FcRule(1, "*WARNING*.xml", desc: "Found WARNING file");
-        var result = await h.Strategy.ScanAsync(Job(dir.Path, false, rule));
+        var result = await h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, rule));
 
         Assert.Equal(1, result.FailuresDetected);
         var f = Assert.Single(h.Saved);
@@ -172,7 +184,7 @@ public class FileContentScanStrategyTests
 
         var h = new Harness();
         var rule = FcRule(1, "*WARNING*.xml", idLocator: "/order/@id", desc: "Quarantined order");
-        var result = await h.Strategy.ScanAsync(Job(dir.Path, false, rule));
+        var result = await h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, rule));
 
         Assert.Equal(1, result.FailuresDetected);
         Assert.Equal("ORD-88134", Assert.Single(h.Saved).SourceId);
@@ -192,7 +204,7 @@ public class FileContentScanStrategyTests
         var rule = FcRule(1, "*.xml",
             locator: "/file/status/code", predType: ScanPredicateType.Equals, predVal: "ERROR",
             idLocator: "/file/header/invoiceId", desc: "Invoice with error status");
-        var result = await h.Strategy.ScanAsync(Job(dir.Path, false, rule));
+        var result = await h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, rule));
 
         Assert.Equal(1, result.FailuresDetected);                     // only the ERROR one
         var f = Assert.Single(h.Saved);
@@ -216,7 +228,7 @@ public class FileContentScanStrategyTests
 
         var h = new Harness();
         var rule = FcRule(1, "*.xml", locator: "/file/status/code", predType: type, predVal: value);
-        var result = await h.Strategy.ScanAsync(Job(dir.Path, false, rule));
+        var result = await h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, rule));
 
         Assert.Equal(shouldFire ? 1 : 0, result.FailuresDetected);
     }
@@ -233,11 +245,11 @@ public class FileContentScanStrategyTests
         var h = new Harness();
         var rule = FcRule(1, "*WARNING*.xml", idLocator: "/order/@id");
 
-        var first = await h.Strategy.ScanAsync(Job(dir.Path, false, rule));
+        var first = await h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, rule));
         Assert.Equal(2, first.FailuresDetected);
         Assert.Equal(2, h.Watermarks.UpsertCount);   // one watermark per examined file
 
-        var second = await h.Strategy.ScanAsync(Job(dir.Path, false, rule));
+        var second = await h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, rule));
         Assert.Equal(0, second.FailuresDetected);     // unchanged files skipped
         Assert.Equal(2, h.Saved.Count);               // no new rows saved overall
     }
@@ -252,7 +264,7 @@ public class FileContentScanStrategyTests
 
         var h = new Harness();
         var rule = FcRule(1, "*WARNING*.xml", idLocator: "/order/missing");
-        var result = await h.Strategy.ScanAsync(Job(dir.Path, false, rule));
+        var result = await h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, rule));
 
         Assert.Equal(1, result.FailuresDetected);
         Assert.Equal("WARNING_z", Assert.Single(h.Saved).SourceId);  // filename fallback
@@ -271,7 +283,7 @@ public class FileContentScanStrategyTests
         // Valid XPath that matches nothing in the file → predicate can't be evaluated.
         var rule = FcRule(1, "*.xml",
             locator: "/file/status/missing", predType: ScanPredicateType.Equals, predVal: "ERROR");
-        var result = await h.Strategy.ScanAsync(Job(dir.Path, false, rule));
+        var result = await h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, rule));
 
         Assert.Equal(0, result.FailuresDetected);
         Assert.Equal(1, result.PredicateUnevaluableSkips);
@@ -288,7 +300,7 @@ public class FileContentScanStrategyTests
 
         var h = new Harness();
         var rule = FcRule(1, "*WARNING*.xml", idLocator: "/order/@id");
-        var result = await h.Strategy.ScanAsync(Job(dir.Path, false, rule));
+        var result = await h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, rule));
 
         Assert.Equal(0, result.FailuresDetected);
         Assert.Equal(1, result.OversizeFileSkips);
@@ -312,7 +324,7 @@ public class FileContentScanStrategyTests
         // A non-FileContent rule on the same job — must be ignored by this strategy.
         var keywordRule = FcRule(3, "*.xml", desc: "noise", checkType: CheckType.ErrorKeyword);
 
-        var result = await h.Strategy.ScanAsync(Job(dir.Path, false, contentRule, filenameRule, keywordRule));
+        var result = await h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, contentRule, filenameRule, keywordRule));
 
         // invoice-error.xml → contentRule (ERROR); WARNING_q.xml → both *.xml content
         // rule (code missing → predicate value not extractable → skip) AND filenameRule.
@@ -337,7 +349,7 @@ public class FileContentScanStrategyTests
             idLocator: "/file/header/invoiceId", desc: "Invoice with error status");
         var filenameRule = FcRule(2, "*WARNING*.xml", idLocator: "/order/@id", desc: "Found WARNING file");
 
-        var result = await h.Strategy.ScanAsync(Job(dir.Path, false, contentRule, filenameRule));
+        var result = await h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, contentRule, filenameRule));
 
         var sb = new StringBuilder();
         sb.AppendLine($"FailuresDetected={result.FailuresDetected}  IdExtractionFailures={result.IdentifierExtractionFailures}  OversizeSkips={result.OversizeFileSkips}");

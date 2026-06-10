@@ -14,7 +14,13 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
             .Include(m => m.JobType)
             .Include(m => m.ScanTypeDefinition)
             .Include(m => m.ScanCheckRules.Where(r => r.IsActive))
+            // Tier 2.5: eager-load active sources (+ type + rules) for per-source scanning.
+            .Include(m => m.ScanSources.Where(s => s.IsActive))
+                .ThenInclude(s => s.ScanTypeDefinition)
+            .Include(m => m.ScanSources.Where(s => s.IsActive))
+                .ThenInclude(s => s.ScanCheckRules.Where(r => r.IsActive))
             .Where(m => m.IsActive)
+            .AsSplitQuery()
             .ToListAsync(ct);
     }
 
@@ -41,6 +47,16 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
             .Include(m => m.ScanTypeDefinition)
             .Include(m => m.ScanCheckRules.Where(r => r.IsActive))
             .Include(m => m.JobRules).ThenInclude(jr => jr.Rule).ThenInclude(r => r!.ErrorType)
+            // Tier 2.5 phase (a→b): eager-load active sources with their scan type
+            // and active rules so the worker can run per-source (phase b). Additive —
+            // existing callers ignore m.ScanSources. Identical filter on both repeated
+            // Includes (EF requires that). Split query avoids a cartesian blow-up from
+            // including a third collection alongside ScanCheckRules + JobRules.
+            .Include(m => m.ScanSources.Where(s => s.IsActive))
+                .ThenInclude(s => s.ScanTypeDefinition)
+            .Include(m => m.ScanSources.Where(s => s.IsActive))
+                .ThenInclude(s => s.ScanCheckRules.Where(r => r.IsActive))
+            .AsSplitQuery()
             .FirstOrDefaultAsync(m => m.MonitoredJobId == monitoredJobId, ct);
     }
 
@@ -51,6 +67,11 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
             .Include(m => m.JobType)
             .Include(m => m.ScanTypeDefinition)
             .Include(m => m.ScanCheckRules.Where(r => r.IsActive))
+            .Include(m => m.ScanSources.Where(s => s.IsActive))
+                .ThenInclude(s => s.ScanTypeDefinition)
+            .Include(m => m.ScanSources.Where(s => s.IsActive))
+                .ThenInclude(s => s.ScanCheckRules.Where(r => r.IsActive))
+            .AsSplitQuery()
             .FirstOrDefaultAsync(m => m.Name == name, ct);
     }
 

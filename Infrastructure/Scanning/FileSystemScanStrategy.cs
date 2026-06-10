@@ -29,17 +29,17 @@ public sealed class FileSystemScanStrategy(
 
     public ScanType ScanType => ScanType.FileSystem;
 
-    public async Task<ScanResult> ScanAsync(MonitoredJob job, CancellationToken ct = default)
+    public async Task<ScanResult> ScanAsync(MonitoredJob job, ScanSource source, CancellationToken ct = default)
     {
-        if (job.LogFolder is null)
-            throw new InvalidOperationException($"Job '{job.Name}' has no LogFolder configured for FileSystem scan.");
+        if (source.LogFolder is null)
+            throw new InvalidOperationException($"Source '{source.Name}' (job '{job.Name}') has no LogFolder configured for FileSystem scan.");
 
         // Filename pattern grammar: see FilenamePattern — '*' is the ONLY
         // wildcard, every other character is literal, no-'*' patterns are
         // case-insensitive substring. Operator splits multiple patterns by
         // comma; empty entries are dropped here. Whitespace-only entries
         // would be filtered later by FilenamePattern.Matches returning false.
-        var patterns = (job.SearchPatterns ?? "*.log")
+        var patterns = (source.SearchPatterns ?? "*.log")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(p => !string.IsNullOrWhiteSpace(p))
             .ToArray();
@@ -47,23 +47,23 @@ public sealed class FileSystemScanStrategy(
         if (patterns.Length == 0)
         {
             logger.LogWarning(
-                "FileSystemScan '{Job}': SearchPatterns is empty after trimming — no files will be scanned",
-                job.Name);
+                "FileSystemScan '{Job}/{Source}': SearchPatterns is empty after trimming — no files will be scanned",
+                job.Name, source.Name);
         }
 
-        var keywordRules = job.ScanCheckRules
+        var keywordRules = source.ScanCheckRules
             .Where(r => r.IsActive && r.CheckType == CheckType.ErrorKeyword)
             .ToList();
 
         logger.LogInformation(
-            "FileSystemScan '{Job}': total ScanCheckRules={Total}, active ErrorKeyword rules={Keywords}",
-            job.Name, job.ScanCheckRules.Count, keywordRules.Count);
+            "FileSystemScan '{Job}/{Source}': total ScanCheckRules={Total}, active ErrorKeyword rules={Keywords}",
+            job.Name, source.Name, source.ScanCheckRules.Count, keywordRules.Count);
 
         var result = new ScanResult
         {
             JobName  = job.Name,
             ScanType = ScanType.FileSystem,
-            Detail   = $"Folder: {job.LogFolder} | Patterns: {string.Join(", ", patterns)}"
+            Detail   = $"Source: {source.Name} | Folder: {source.LogFolder} | Patterns: {string.Join(", ", patterns)}"
         };
 
         if (keywordRules.Count == 0)
@@ -71,7 +71,7 @@ public sealed class FileSystemScanStrategy(
             // No keyword rules — full pipeline mode (scan all log lines)
             foreach (var pattern in patterns)
             {
-                var r = await pipeline.ExecuteAsync(job.LogFolder, pattern, false, ct);
+                var r = await pipeline.ExecuteAsync(source.LogFolder, pattern, false, ct);
                 result.FailuresDetected += r.JobsCreated;
                 result.Classifications  += r.Classifications;
                 result.Recommendations  += r.Recommendations;
@@ -80,9 +80,9 @@ public sealed class FileSystemScanStrategy(
         }
 
         // Keyword mode: flag any file whose lines contain one of the configured keywords
-        if (!Directory.Exists(job.LogFolder))
+        if (!Directory.Exists(source.LogFolder))
         {
-            logger.LogWarning("FileSystemScan '{Job}': folder not found: {Folder}", job.Name, job.LogFolder);
+            logger.LogWarning("FileSystemScan '{Job}/{Source}': folder not found: {Folder}", job.Name, source.Name, source.LogFolder);
             return result;
         }
 
@@ -96,7 +96,7 @@ public sealed class FileSystemScanStrategy(
         // matches the classification-rule pattern convention.
         // No-arg EnumerateFiles overload returns ALL files, avoiding the
         // Win32-`*` legacy quirk where "*" can match files-with-no-extension only.
-        var allFiles = Directory.EnumerateFiles(job.LogFolder).ToList();
+        var allFiles = Directory.EnumerateFiles(source.LogFolder).ToList();
 
         foreach (var pattern in patterns)
         {
@@ -159,7 +159,7 @@ public sealed class FileSystemScanStrategy(
                         string? sourceFilePath = null;
                         if (!string.IsNullOrEmpty(rule.InputPathPattern))
                         {
-                            sourceFilePath = ExtractInputPath(rawLine, rule.InputPathPattern, job.InputFolder);
+                            sourceFilePath = ExtractInputPath(rawLine, rule.InputPathPattern, source.InputFolder);
                             if (sourceFilePath is null)
                                 logger.LogInformation(
                                     "FileSystemScan '{Job}': InputPathPattern on rule {RuleId} did not capture in line — line snippet: {Excerpt}",
@@ -170,8 +170,9 @@ public sealed class FileSystemScanStrategy(
                         var failure = new JobFailure
                         {
                             JobId          = 0,
-                            JobTypeId      = job.JobTypeId,
+                            JobTypeId      = job.JobTypeId,          // identity from the job
                             MonitoredJobId = job.MonitoredJobId,
+                            ScanSourceId   = source.ScanSourceId,    // which source produced it
                             StepName       = Path.GetFileName(file),
                             SourceId       = Path.GetFileName(file),
                             ErrorMessage   = $"[{keyword}] {Path.GetFileName(file)}: {excerpt}",

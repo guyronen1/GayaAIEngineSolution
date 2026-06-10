@@ -63,17 +63,9 @@ public class JobScanController(
 
         foreach (var job in jobs)
         {
-            var strategy = strategies.FirstOrDefault(s => s.ScanType == job.ScanType);
-            if (strategy is null)
-            {
-                results.Add(new { job.MonitoredJobId, job.Name, job.ScanType, Skipped = true,
-                                  Reason = $"No strategy registered for ScanType '{job.ScanType}'." });
-                continue;
-            }
-
             try
             {
-                var r = await ExecuteAndRecordAsync(job, strategy, ct);
+                var r = await RunJobSourcesAsync(job, ct);
                 results.Add(new
                 {
                     job.MonitoredJobId, job.Name, job.ScanType, Skipped = false,
@@ -114,68 +106,104 @@ public class JobScanController(
 
     private async Task<IActionResult> RunScanAsync(MonitoredJob job, CancellationToken ct)
     {
-        var strategy = strategies.FirstOrDefault(s => s.ScanType == job.ScanType);
-        if (strategy is null)
-            return BadRequest(new { Message = $"No scan strategy registered for ScanType '{job.ScanType}'." });
+        if (!job.ScanSources.Any(s => s.IsActive))
+            return BadRequest(new { Message = $"Job '{job.Name}' has no active scan sources." });
 
-        var result = await ExecuteAndRecordAsync(job, strategy, ct);
-        return Ok(result);
+        var agg = await RunJobSourcesAsync(job, ct);
+        return Ok(agg);
     }
 
     /// <summary>
-    /// Runs the scan and appends a ScanRunHistory row regardless of outcome. Mirrors
-    /// the finally-block in <c>MonitoringWorker.RunOneJobAsync</c> so manual triggers
-    /// surface in the dashboard's recent-activity feed the same way scheduled scans do.
-    /// History-write failures are swallowed — they must not poison the operator's
-    /// scan response.
+    /// Tier 2.5: run every active source of the job (sequentially) and aggregate the
+    /// per-source ScanResults into one response. Each source writes its own
+    /// ScanRunHistory row (with ScanSourceId), mirroring the worker. Best-effort per
+    /// source (an exception on one source is recorded and the rest still run); client
+    /// cancellation propagates. For today's single-source jobs the aggregate equals
+    /// that one source's result.
     /// </summary>
-    private async Task<ScanResult> ExecuteAndRecordAsync(
-        MonitoredJob job, IScanStrategy strategy, CancellationToken ct)
+    private async Task<ScanResult> RunJobSourcesAsync(MonitoredJob job, CancellationToken ct)
     {
-        var leasedBy  = $"{ManualLeasedByPrefix};runId={Guid.NewGuid():N}";
-        var startedAt = DateTime.Now;
-        var outcome   = JobRunOutcome.Success;
-        string? error = null;
+        var agg = new ScanResult { JobName = job.Name, ScanType = job.ScanType, Detail = string.Empty };
+        var details = new List<string>();
 
-        ScanResult? result = null;
-        try
+        foreach (var source in job.ScanSources.Where(s => s.IsActive))
         {
-            result = await strategy.ScanAsync(job, ct);
-            return result;
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            outcome = JobRunOutcome.Timeout;
-            error   = "Scan cancelled by client";
-            throw;
-        }
-        catch (Exception ex)
-        {
-            outcome = JobRunOutcome.Failed;
-            error   = ex.Message;
-            throw;
-        }
-        finally
-        {
-            var completedAt = DateTime.Now;
+            var strategy = strategies.FirstOrDefault(s => s.ScanType == source.ScanType);
+            if (strategy is null)
+            {
+                details.Add($"{source.Name}: no strategy for {source.ScanType}");
+                await RecordSourceHistoryAsync(job, source.ScanSourceId, JobRunOutcome.Failed,
+                    $"No scan strategy for ScanType '{source.ScanType}'", null, DateTime.Now, ct);
+                continue;
+            }
+
+            var startedAt = DateTime.Now;
+            var outcome   = JobRunOutcome.Success;
+            string? error = null;
+            ScanResult? r = null;
             try
             {
-                var durationMs = (int)Math.Clamp((completedAt - startedAt).TotalMilliseconds, 0, int.MaxValue);
-                await historyRepo.SaveAsync(new ScanRunHistory
-                {
-                    MonitoredJobId   = job.MonitoredJobId,
-                    LeasedBy         = leasedBy,
-                    StartedAt        = startedAt,
-                    CompletedAt      = completedAt,
-                    DurationMs       = durationMs,
-                    Outcome          = outcome,
-                    Error            = error is null ? null : (error.Length > 2000 ? error[..2000] : error),
-                    FailuresDetected = result?.FailuresDetected ?? 0,
-                    Classifications  = result?.Classifications  ?? 0,
-                    Recommendations  = result?.Recommendations  ?? 0,
-                }, ct);
+                r = await strategy.ScanAsync(job, source, ct);
+                agg.FailuresDetected             += r.FailuresDetected;
+                agg.Classifications              += r.Classifications;
+                agg.Recommendations              += r.Recommendations;
+                agg.IdentifierExtractionFailures += r.IdentifierExtractionFailures;
+                agg.OversizeFileSkips            += r.OversizeFileSkips;
+                agg.PredicateUnevaluableSkips    += r.PredicateUnevaluableSkips;
+                if (!string.IsNullOrEmpty(r.Detail)) details.Add($"{source.Name}: {r.Detail}");
             }
-            catch { /* don't let history-write failures affect the scan response */ }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                outcome = JobRunOutcome.Timeout;
+                error   = "Scan cancelled by client";
+                await RecordSourceHistoryAsync(job, source.ScanSourceId, outcome, error, r, startedAt, ct);
+                throw;   // client gone — propagate
+            }
+            catch (Exception ex)
+            {
+                outcome = JobRunOutcome.Failed;
+                error   = ex.Message;
+                details.Add($"{source.Name}: ERROR {ex.Message}");
+            }
+            await RecordSourceHistoryAsync(job, source.ScanSourceId, outcome, error, r, startedAt, ct);
         }
+
+        agg.Detail = string.Join(" | ", details);
+        return agg;
+    }
+
+    /// <summary>
+    /// Appends one ScanRunHistory row for a manual source scan — mirrors the worker's
+    /// per-source row. History-write failures are swallowed so they never poison the
+    /// operator's scan response.
+    /// </summary>
+    private async Task RecordSourceHistoryAsync(
+        MonitoredJob job, int? scanSourceId, JobRunOutcome outcome, string? error,
+        ScanResult? result, DateTime startedAt, CancellationToken ct)
+    {
+        var leasedBy    = $"{ManualLeasedByPrefix};runId={Guid.NewGuid():N}";
+        var completedAt = DateTime.Now;
+        try
+        {
+            var durationMs = (int)Math.Clamp((completedAt - startedAt).TotalMilliseconds, 0, int.MaxValue);
+            await historyRepo.SaveAsync(new ScanRunHistory
+            {
+                MonitoredJobId   = job.MonitoredJobId,
+                ScanSourceId     = scanSourceId,
+                LeasedBy         = leasedBy,
+                StartedAt        = startedAt,
+                CompletedAt      = completedAt,
+                DurationMs       = durationMs,
+                Outcome          = outcome,
+                Error            = error is null ? null : (error.Length > 2000 ? error[..2000] : error),
+                FailuresDetected = result?.FailuresDetected ?? 0,
+                Classifications  = result?.Classifications  ?? 0,
+                Recommendations  = result?.Recommendations  ?? 0,
+                IdentifierExtractionFailures = result?.IdentifierExtractionFailures ?? 0,
+                OversizeFileSkips            = result?.OversizeFileSkips            ?? 0,
+                PredicateUnevaluableSkips    = result?.PredicateUnevaluableSkips    ?? 0,
+            }, ct);
+        }
+        catch { /* don't let history-write failures affect the scan response */ }
     }
 }

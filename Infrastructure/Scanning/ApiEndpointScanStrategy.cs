@@ -19,16 +19,16 @@ public sealed class ApiEndpointScanStrategy(
 {
     public ScanType ScanType => ScanType.ApiEndpoint;
 
-    public async Task<ScanResult> ScanAsync(MonitoredJob job, CancellationToken ct = default)
+    public async Task<ScanResult> ScanAsync(MonitoredJob job, ScanSource source, CancellationToken ct = default)
     {
-        if (job.LogSourceUrl is null)
-            throw new InvalidOperationException($"Job '{job.Name}' has no LogSourceUrl configured for ApiEndpoint scan.");
+        if (source.LogSourceUrl is null)
+            throw new InvalidOperationException($"Source '{source.Name}' (job '{job.Name}') has no LogSourceUrl configured for ApiEndpoint scan.");
 
         var result = new ScanResult
         {
             JobName  = job.Name,
             ScanType = ScanType.ApiEndpoint,
-            Detail   = $"URL: {job.LogSourceUrl}"
+            Detail   = $"URL: {source.LogSourceUrl}"
         };
 
         string?             statusStr    = null;
@@ -38,7 +38,7 @@ public sealed class ApiEndpointScanStrategy(
         try
         {
             var http     = httpFactory.CreateClient();
-            var response = await http.GetAsync(job.LogSourceUrl, ct);
+            var response = await http.GetAsync(source.LogSourceUrl, ct);
             statusStr    = response.StatusCode.ToString();
             responseBody = await response.Content.ReadAsStringAsync(ct);
 
@@ -61,12 +61,13 @@ public sealed class ApiEndpointScanStrategy(
         var failure = new JobFailure
         {
             JobId          = 0,
-            JobTypeId      = job.JobTypeId,
+            JobTypeId      = job.JobTypeId,          // identity from the job
             MonitoredJobId = job.MonitoredJobId,
+            ScanSourceId   = source.ScanSourceId,    // which source produced it
             StepName       = "ApiEndpointCheck",
-            SourceId       = job.LogSourceUrl,
+            SourceId       = source.LogSourceUrl,
             ErrorMessage   = $"API check failed: status={statusStr}, body={snippet}",
-            SourceLogPath  = job.LogSourceUrl,
+            SourceLogPath  = source.LogSourceUrl,
             Status         = JobStatus.Failed,
             DetectedAt     = DateTime.Now,
         };
@@ -74,8 +75,8 @@ public sealed class ApiEndpointScanStrategy(
         failure = await jobRepo.SaveAsync(failure, ct);
         result.FailuresDetected = 1;
 
-        logger.LogInformation("ApiEndpointScan '{Job}': failure detected at {Url} — status {Status}",
-            job.Name, job.LogSourceUrl, statusStr);
+        logger.LogInformation("ApiEndpointScan '{Job}/{Source}': failure detected at {Url} — status {Status}",
+            job.Name, source.Name, source.LogSourceUrl, statusStr);
 
         var classifications = await classify.ExecuteAsync([failure], ct);
         result.Classifications = classifications.Count;

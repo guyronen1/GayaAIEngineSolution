@@ -2,6 +2,7 @@ using MaiaAI.Core.Entities;
 using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Interfaces.UseCases;
+using MaiaAI.Core.Results;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -114,116 +115,160 @@ public sealed class MonitoringWorker(
         var historyRepo = scope.ServiceProvider.GetRequiredService<IScanRunHistoryRepository>();
         var strategies  = scope.ServiceProvider.GetServices<IScanStrategy>();
 
-        var outcome = JobRunOutcome.Success;
-        string? error = null;
+        var jobOutcome = JobRunOutcome.Success;   // rolled-up across sources (worst wins)
+        string? jobError = null;                   // first error surfaced, for the lease row
         var pollingIntervalSeconds = 300;
-        var startedAt = DateTime.Now;
-        var failures = 0; var classifications = 0; var recommendations = 0;
-        var identifierExtractionFailures = 0; var oversizeFileSkips = 0; var predicateUnevaluableSkips = 0;
 
         try
         {
             var job = await jobRepo.GetByIdAsync(lease.MonitoredJobId, jobCts.Token);
             if (job is null)
             {
-                outcome = JobRunOutcome.Failed;
-                error   = $"MonitoredJob {lease.MonitoredJobId} not found at scan time";
-                logger.LogWarning(error);
+                // Pre-source failure: record on the lease (LastRunOutcome); ScanRunHistory
+                // captures actual source executions only, so no history row here.
+                jobOutcome = JobRunOutcome.Failed;
+                jobError   = $"MonitoredJob {lease.MonitoredJobId} not found at scan time";
+                logger.LogWarning(jobError);
                 return;
             }
 
             pollingIntervalSeconds = job.PollingIntervalSeconds;
 
-            var strategy = strategies.FirstOrDefault(s => s.ScanType == job.ScanType);
-            if (strategy is null)
+            var sources = job.ScanSources.Where(s => s.IsActive).ToList();
+            if (sources.Count == 0)
             {
-                outcome = JobRunOutcome.Failed;
-                error   = $"No scan strategy for ScanType '{job.ScanType}'";
-                logger.LogWarning("{Error} on job '{Name}'", error, job.Name);
-                return;
+                logger.LogWarning("MonitoringWorker: job '{Name}' has no active scan sources — nothing to scan", job.Name);
+                return;   // outcome stays Success; nothing executed → no history row
             }
 
-            logger.LogInformation(
-                "MonitoringWorker: [{ScanType}] scan for job '{Name}' (lease {Seconds}s)",
-                job.ScanType, job.Name, lease.LeaseDurationSeconds);
+            // Tier 2.5: sources run SEQUENTIALLY under the single per-job lease. One
+            // ScanRunHistory row per source. A source exception is best-effort (record
+            // that source Failed, continue); a timeout (shared jobCts) ends the tick —
+            // remaining sources have no budget and get no row.
+            foreach (var source in sources)
+            {
+                if (jobCts.IsCancellationRequested) break;
 
-            var result = await strategy.ScanAsync(job, jobCts.Token);
-            failures        = result.FailuresDetected;
-            classifications = result.Classifications;
-            recommendations = result.Recommendations;
-            identifierExtractionFailures = result.IdentifierExtractionFailures;
-            oversizeFileSkips            = result.OversizeFileSkips;
-            predicateUnevaluableSkips    = result.PredicateUnevaluableSkips;
+                var srcStartedAt   = DateTime.Now;
+                var srcOutcome     = JobRunOutcome.Success;
+                string? srcError   = null;
+                ScanResult? result = null;
 
-            logger.LogInformation(
-                "MonitoredJob '{Name}' [{ScanType}]: {Failures} failures, " +
-                "{Classifications} classified, {Recommendations} recommendations — {Detail}",
-                job.Name, job.ScanType, failures, classifications, recommendations, result.Detail);
+                try
+                {
+                    var strategy = strategies.FirstOrDefault(s => s.ScanType == source.ScanType);
+                    if (strategy is null)
+                    {
+                        srcOutcome = JobRunOutcome.Failed;
+                        srcError   = $"No scan strategy for ScanType '{source.ScanType}'";
+                        logger.LogWarning("{Error} on source '{Source}' of job '{Name}'", srcError, source.Name, job.Name);
+                    }
+                    else
+                    {
+                        logger.LogInformation(
+                            "MonitoringWorker: [{ScanType}] scan for '{Name}/{Source}' (lease {Seconds}s)",
+                            source.ScanType, job.Name, source.Name, lease.LeaseDurationSeconds);
+
+                        result = await strategy.ScanAsync(job, source, jobCts.Token);
+
+                        logger.LogInformation(
+                            "Source '{Name}/{Source}' [{ScanType}]: {Failures} failures, " +
+                            "{Classifications} classified, {Recommendations} recommendations — {Detail}",
+                            job.Name, source.Name, source.ScanType,
+                            result.FailuresDetected, result.Classifications, result.Recommendations, result.Detail);
+                    }
+                }
+                catch (OperationCanceledException) when (!hostCt.IsCancellationRequested)
+                {
+                    srcOutcome = JobRunOutcome.Timeout;
+                    srcError   = $"Source exceeded lease duration ({lease.LeaseDurationSeconds}s)";
+                    logger.LogWarning("Scan timed out for source '{Source}' of job {JobId}", source.Name, lease.MonitoredJobId);
+                }
+                catch (Exception ex)
+                {
+                    srcOutcome = JobRunOutcome.Failed;
+                    srcError   = ex.Message;
+                    logger.LogError(ex, "Scan failed for source '{Source}' of job {JobId}", source.Name, lease.MonitoredJobId);
+                }
+
+                await WriteSourceHistoryAsync(
+                    historyRepo, lease.MonitoredJobId, source.ScanSourceId,
+                    srcStartedAt, srcOutcome, srcError, result, hostCt);
+
+                // Roll up worst outcome for the lease: Timeout > Failed > Success.
+                if (srcOutcome == JobRunOutcome.Timeout) jobOutcome = JobRunOutcome.Timeout;
+                else if (srcOutcome == JobRunOutcome.Failed && jobOutcome != JobRunOutcome.Timeout) jobOutcome = JobRunOutcome.Failed;
+                if (srcError is not null && jobError is null) jobError = srcError;
+
+                if (srcOutcome == JobRunOutcome.Timeout) break;   // stop-on-timeout
+            }
         }
         catch (OperationCanceledException) when (!hostCt.IsCancellationRequested)
         {
-            outcome = JobRunOutcome.Timeout;
-            error   = $"Job exceeded lease duration ({lease.LeaseDurationSeconds}s)";
+            jobOutcome = JobRunOutcome.Timeout;
+            jobError ??= $"Job exceeded lease duration ({lease.LeaseDurationSeconds}s)";
             logger.LogWarning("Scan timed out for job {JobId}", lease.MonitoredJobId);
         }
         catch (Exception ex)
         {
-            outcome = JobRunOutcome.Failed;
-            error   = ex.Message;
+            jobOutcome = JobRunOutcome.Failed;
+            jobError ??= ex.Message;
             logger.LogError(ex, "Scan failed for job {JobId}", lease.MonitoredJobId);
         }
         finally
         {
-            var completedAt = DateTime.Now;
-
-            // Release uses the host token, not jobCts — we want to record outcome
-            // even when the run timed out.
+            // Release ONCE with the rolled-up outcome. Host token (not jobCts) so the
+            // outcome is recorded even after a timeout.
             try
             {
                 var stillOurs = await leaseRepo.ReleaseAsync(
-                    lease.MonitoredJobId, _leasedBy, outcome,
-                    pollingIntervalSeconds, error, hostCt);
+                    lease.MonitoredJobId, _leasedBy, jobOutcome,
+                    pollingIntervalSeconds, jobError, hostCt);
 
                 if (!stillOurs)
-                {
-                    outcome = JobRunOutcome.Stolen;
                     logger.LogWarning(
                         "Lease for job {JobId} was stolen before release — results recorded but lease state untouched",
                         lease.MonitoredJobId);
-                }
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to release lease for job {JobId}", lease.MonitoredJobId);
             }
+        }
+    }
 
-            // Append history row regardless of stolen/timeout/failed — append-only audit
-            // of every scan attempt. Wrapped in its own try so a history-write failure
-            // never bubbles into the worker loop.
-            try
+    /// <summary>One ScanRunHistory row per source that ran/attempted. Own try so a
+    /// history-write failure never breaks the source loop. result == null means the
+    /// source failed before producing counts (no strategy / threw).</summary>
+    private async Task WriteSourceHistoryAsync(
+        IScanRunHistoryRepository historyRepo, int monitoredJobId, int? scanSourceId,
+        DateTime startedAt, JobRunOutcome outcome, string? error, ScanResult? result, CancellationToken ct)
+    {
+        try
+        {
+            var completedAt = DateTime.Now;
+            var durationMs  = (int)Math.Clamp((completedAt - startedAt).TotalMilliseconds, 0, int.MaxValue);
+            await historyRepo.SaveAsync(new ScanRunHistory
             {
-                var durationMs = (int)Math.Clamp((completedAt - startedAt).TotalMilliseconds, 0, int.MaxValue);
-                await historyRepo.SaveAsync(new ScanRunHistory
-                {
-                    MonitoredJobId   = lease.MonitoredJobId,
-                    LeasedBy         = _leasedBy,
-                    StartedAt        = startedAt,
-                    CompletedAt      = completedAt,
-                    DurationMs       = durationMs,
-                    Outcome          = outcome,
-                    Error            = error is null ? null : (error.Length > 2000 ? error[..2000] : error),
-                    FailuresDetected = failures,
-                    Classifications  = classifications,
-                    Recommendations  = recommendations,
-                    IdentifierExtractionFailures = identifierExtractionFailures,
-                    OversizeFileSkips            = oversizeFileSkips,
-                    PredicateUnevaluableSkips    = predicateUnevaluableSkips,
-                }, hostCt);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to write ScanRunHistory for job {JobId}", lease.MonitoredJobId);
-            }
+                MonitoredJobId   = monitoredJobId,
+                ScanSourceId     = scanSourceId,
+                LeasedBy         = _leasedBy,
+                StartedAt        = startedAt,
+                CompletedAt      = completedAt,
+                DurationMs       = durationMs,
+                Outcome          = outcome,
+                Error            = error is null ? null : (error.Length > 2000 ? error[..2000] : error),
+                FailuresDetected = result?.FailuresDetected ?? 0,
+                Classifications  = result?.Classifications  ?? 0,
+                Recommendations  = result?.Recommendations  ?? 0,
+                IdentifierExtractionFailures = result?.IdentifierExtractionFailures ?? 0,
+                OversizeFileSkips            = result?.OversizeFileSkips            ?? 0,
+                PredicateUnevaluableSkips    = result?.PredicateUnevaluableSkips    ?? 0,
+            }, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to write ScanRunHistory for source {SourceId} of job {JobId}", scanSourceId, monitoredJobId);
         }
     }
 }

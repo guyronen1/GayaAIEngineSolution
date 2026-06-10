@@ -30,9 +30,9 @@ public sealed class DatabaseScanStrategy(
 
     public ScanType ScanType => ScanType.Database;
 
-    public async Task<ScanResult> ScanAsync(MonitoredJob job, CancellationToken ct = default)
+    public async Task<ScanResult> ScanAsync(MonitoredJob job, ScanSource source, CancellationToken ct = default)
     {
-        var rules = job.ScanCheckRules
+        var rules = source.ScanCheckRules
             .Where(r => r.IsActive && SupportedTypes.Contains(r.CheckType))
             .ToList();
 
@@ -47,10 +47,10 @@ public sealed class DatabaseScanStrategy(
                 $"Job '{job.Name}': {missingTable.Count} rule(s) have no SourceTable — " +
                 $"rule IDs: {string.Join(", ", missingTable.Select(r => r.CheckRuleId))}.");
 
-        var connStr = config.GetConnectionString(job.ConnectionName ?? "DefaultConnection");
+        var connStr = config.GetConnectionString(source.ConnectionName ?? "DefaultConnection");
         if (string.IsNullOrWhiteSpace(connStr))
             throw new InvalidOperationException(
-                $"Connection string '{job.ConnectionName ?? "DefaultConnection"}' not found in configuration.");
+                $"Connection string '{source.ConnectionName ?? "DefaultConnection"}' not found in configuration.");
 
         var result = new ScanResult
         {
@@ -109,12 +109,13 @@ public sealed class DatabaseScanStrategy(
                 var failure = new JobFailure
                 {
                     JobId          = 0,
-                    JobTypeId      = job.JobTypeId,
+                    JobTypeId      = job.JobTypeId,          // identity from the job
                     MonitoredJobId = job.MonitoredJobId,
+                    ScanSourceId   = source.ScanSourceId,    // which source produced it
                     StepName       = rule.SourceTable,
                     SourceId       = srcValue ?? rowKey,
                     ErrorMessage   = BuildRowMessage(rule, rowKey, value, wmValue, srcValue),
-                    SourceLogPath  = $"db://{job.ConnectionName ?? "DefaultConnection"}/{rule.SourceTable}",
+                    SourceLogPath  = $"db://{source.ConnectionName ?? "DefaultConnection"}/{rule.SourceTable}",
                     SourceFilePath = filePathValue,   // null when rule.FilePathColumn unset
                     Status         = JobStatus.Failed,
                     DetectedAt     = DateTime.Now,
