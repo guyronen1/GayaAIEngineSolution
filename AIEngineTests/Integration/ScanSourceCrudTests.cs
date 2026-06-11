@@ -3,6 +3,7 @@ using AIEngineAPI.Controllers;
 using MaiaAI.Core.Entities;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Infrastructure.DataAccess;
+using MaiaAI.Infrastructure.Fix;
 using MaiaAI.Infrastructure.Scanning;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -48,7 +49,8 @@ public class ScanSourceCrudTests : IAsyncLifetime
             _audit,
             NullLogger<ConfigController>.Instance,
             new TestDbContextFactory(options),
-            new IFileContentExtractor[] { new XmlContentExtractor(NullLogger<XmlContentExtractor>.Instance) });
+            new IFileContentExtractor[] { new XmlContentExtractor(NullLogger<XmlContentExtractor>.Instance) },
+            new SqlFixScopeValidator());
     }
 
     public Task DisposeAsync() => _db.DisposeAsync().AsTask();

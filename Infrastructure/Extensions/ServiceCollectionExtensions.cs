@@ -90,6 +90,9 @@ public static class ServiceCollectionExtensions
         // SqlConnection used only by DatabaseScanStrategy's SqlQuery branch.
         services.AddScoped<ISqlQueryRunner, SqlQueryRunner>();
 
+        // Save-time guard for SqlScript fix payloads (layer-1 write block). Stateless.
+        services.AddSingleton<ISqlFixScopeValidator, SqlFixScopeValidator>();
+
         // ── Scan strategies (one per ScanType, resolved via IEnumerable<IScanStrategy>) ─
         services.AddScoped<IScanStrategy, FileSystemScanStrategy>();
         services.AddScoped<IScanStrategy, DatabaseScanStrategy>();

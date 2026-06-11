@@ -28,7 +28,8 @@ public class ConfigController(
     IAuditRepository                  audit,
     ILogger<ConfigController>         logger,
     IDbContextFactory<AiDbContext>    dbFactory,
-    IEnumerable<IFileContentExtractor> extractors) : ControllerBase
+    IEnumerable<IFileContentExtractor> extractors,
+    ISqlFixScopeValidator             sqlFixScope) : ControllerBase
 {
     // FileContent extractors keyed by format — used to validate a rule's
     // locator syntax at save time (each extractor owns its locator grammar).
@@ -150,7 +151,16 @@ public class ConfigController(
 
         if (!hasSteps)
         {
-            // Single-action policy — no further validation.
+            // Single-action policy. The one content check: a SqlScript fix is a
+            // WRITE against the source DB, so it must be scoped to the failing row
+            // ({sourceId} in WHERE / EXEC param) — block bulk UPDATE/DELETE.
+            if (actionType == FixActionType.SqlScript
+                && !string.IsNullOrWhiteSpace(req.ActionPayload)
+                && sqlFixScope.Validate(req.ActionPayload!) is { } reason)
+            {
+                error = BadRequest(new { error = "DbFixRequiresSourceIdInWhere", message = $"SqlScript fix {reason}" });
+                normalisedSteps = null; return true;
+            }
             error = null!; normalisedSteps = null; return false;
         }
 
@@ -176,6 +186,13 @@ public class ConfigController(
             if (string.IsNullOrWhiteSpace(s.ActionPayload))
             {
                 error = BadRequest(new { error = "StepPayloadRequired", message = $"Step at order {s.StepOrder} has no payload." });
+                normalisedSteps = null; return true;
+            }
+            // Same WRITE guard as single-action, per SqlScript step.
+            if (stepActionType == FixActionType.SqlScript
+                && sqlFixScope.Validate(s.ActionPayload!) is { } stepReason)
+            {
+                error = BadRequest(new { error = "DbFixRequiresSourceIdInWhere", message = $"SqlScript step at order {s.StepOrder} {stepReason}" });
                 normalisedSteps = null; return true;
             }
             if (!seenOrders.Add(s.StepOrder))
