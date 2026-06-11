@@ -86,6 +86,10 @@ public static class ServiceCollectionExtensions
         //    by ExtractorType). Add CSV/JSON/Excel here in v2. ──────────────────
         services.AddScoped<IFileContentExtractor, XmlContentExtractor>();
 
+        // SqlQuery (CheckType) execution seam — testability wrapper around
+        // SqlConnection used only by DatabaseScanStrategy's SqlQuery branch.
+        services.AddScoped<ISqlQueryRunner, SqlQueryRunner>();
+
         // ── Scan strategies (one per ScanType, resolved via IEnumerable<IScanStrategy>) ─
         services.AddScoped<IScanStrategy, FileSystemScanStrategy>();
         services.AddScoped<IScanStrategy, DatabaseScanStrategy>();

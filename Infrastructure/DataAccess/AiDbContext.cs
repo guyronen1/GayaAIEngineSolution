@@ -401,7 +401,10 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.ToTable("ScanCheckRules");
             e.HasKey(r => r.CheckRuleId);
             e.Property(r => r.CheckType).IsRequired().HasMaxLength(50).HasConversion<string>();
-            e.Property(r => r.SourceTable).HasMaxLength(200);
+            // nvarchar(max): for ColumnRange/ValueEquals this holds a table name
+            // ("dbo.Orders"); for CheckType.SqlQuery it holds the operator-written
+            // query / EXEC statement, which can be multi-line and well over 200 chars.
+            e.Property(r => r.SourceTable).HasColumnType("nvarchar(max)");
             e.Property(r => r.TargetField).IsRequired().HasMaxLength(200);
             e.Property(r => r.MinValue).HasPrecision(18, 4);
             e.Property(r => r.MaxValue).HasPrecision(18, 4);

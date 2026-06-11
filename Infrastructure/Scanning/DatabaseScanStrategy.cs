@@ -23,10 +23,14 @@ public sealed class DatabaseScanStrategy(
     IScanWatermarkRepository      watermarks,
     IClassifyJobsUseCase          classify,
     IGenerateSuggestionsUseCase   suggest,
+    ISqlQueryRunner               sqlRunner,
     ILogger<DatabaseScanStrategy> logger) : IScanStrategy
 {
     private static readonly HashSet<CheckType> SupportedTypes =
-        [CheckType.ColumnRange, CheckType.ValueEquals];
+        [CheckType.ColumnRange, CheckType.ValueEquals, CheckType.SqlQuery];
+
+    // Code-side cap for SqlQuery (can't inject TOP into an arbitrary query/proc).
+    private const int MaxSqlQueryRows = 500;
 
     public ScanType ScanType => ScanType.Database;
 
@@ -70,17 +74,39 @@ public sealed class DatabaseScanStrategy(
                 continue;
             }
 
-            // Get the current watermark for this rule (null = first scan ever)
+            // Short, stable label used for BOTH the failure's StepName (nvarchar(200))
+            // and the no-watermark dedup key. For SqlQuery the SourceTable IS the
+            // (possibly multi-line, multi-KB) query, so it can't serve as either —
+            // use the rule Description or a per-rule label. For table rules this is
+            // just the table name, exactly as before.
+            var stepName = rule.CheckType == CheckType.SqlQuery
+                ? (string.IsNullOrWhiteSpace(rule.Description) ? $"SqlQuery #{rule.CheckRuleId}" : rule.Description!)
+                : rule.SourceTable!;
+            var conn = source.ConnectionName ?? "DefaultConnection";
+            var sourceLogPath = rule.CheckType == CheckType.SqlQuery
+                ? $"db://{conn}/query"
+                : $"db://{conn}/{rule.SourceTable}";
+
+            // Get the current watermark for this rule (null = first scan ever).
+            // SqlQuery rules carry no WatermarkColumn (deferred), so this is null.
             string? watermark = rule.WatermarkColumn is not null
                 ? await watermarks.GetDbWatermarkAsync(rule.CheckRuleId, ct)
                 : null;
 
-            var rows = await QueryMatchingRowsAsync(connStr, rule.SourceTable!, rule, watermark, ct);
+            var rows = rule.CheckType == CheckType.SqlQuery
+                ? await QuerySqlAsync(connStr, rule, ct)
+                : await QueryMatchingRowsAsync(connStr, rule.SourceTable!, rule, watermark, ct);
+
+            if (rule.CheckType == CheckType.SqlQuery && rows.Count >= MaxSqlQueryRows)
+                logger.LogWarning(
+                    "DatabaseScan '{Job}': SqlQuery rule {RuleId} hit the {Cap}-row cap — results may be truncated.",
+                    job.Name, rule.CheckRuleId, MaxSqlQueryRows);
 
             // Advance the watermark to the highest WatermarkColumn value seen this scan.
             // When zero rows matched, take MAX over rows that satisfy the rule's filter —
             // NOT MAX over the whole table, because a future-dated healthy row would jump
             // the watermark past any current-dated unhealthy row inserted next.
+            // (SqlQuery has no watermark, so this whole block is skipped.)
             if (rule.WatermarkColumn is not null)
             {
                 var newWatermark = rows.Count > 0
@@ -93,11 +119,13 @@ public sealed class DatabaseScanStrategy(
             else if (rows.Count > 0)
             {
                 // No watermark column configured — fall back to open-failure dedup
-                if (await jobRepo.HasOpenFailureAsync(job.MonitoredJobId, rule.SourceTable!, rule.TargetField, ct))
+                // keyed on StepName (table name for table rules, the SqlQuery label
+                // for SqlQuery rules).
+                if (await jobRepo.HasOpenFailureAsync(job.MonitoredJobId, stepName, rule.TargetField, ct))
                 {
                     logger.LogDebug(
-                        "DatabaseScan '{Job}': open failure already exists for [{Table}].[{Column}] — skipping",
-                        job.Name, rule.SourceTable, rule.TargetField);
+                        "DatabaseScan '{Job}': open failure already exists for '{Step}' — skipping",
+                        job.Name, stepName);
                     continue;
                 }
             }
@@ -112,10 +140,10 @@ public sealed class DatabaseScanStrategy(
                     JobTypeId      = job.JobTypeId,          // identity from the job
                     MonitoredJobId = job.MonitoredJobId,
                     ScanSourceId   = source.ScanSourceId,    // which source produced it
-                    StepName       = rule.SourceTable,
+                    StepName       = stepName,
                     SourceId       = srcValue ?? rowKey,
                     ErrorMessage   = BuildRowMessage(rule, rowKey, value, wmValue, srcValue),
-                    SourceLogPath  = $"db://{source.ConnectionName ?? "DefaultConnection"}/{rule.SourceTable}",
+                    SourceLogPath  = sourceLogPath,
                     SourceFilePath = filePathValue,   // null when rule.FilePathColumn unset
                     Status         = JobStatus.Failed,
                     DetectedAt     = DateTime.Now,
@@ -126,8 +154,8 @@ public sealed class DatabaseScanStrategy(
             }
 
             logger.LogInformation(
-                "DatabaseScan '{Job}': [{Table}].[{Column}] — {Count} row(s) matched rule {RuleId} ({CheckType})",
-                job.Name, rule.SourceTable, rule.TargetField, rows.Count, rule.CheckRuleId, rule.CheckType);
+                "DatabaseScan '{Job}': {Step} — {Count} row(s) matched rule {RuleId} ({CheckType})",
+                job.Name, stepName, rows.Count, rule.CheckRuleId, rule.CheckType);
         }
 
         result.FailuresDetected = created.Count;
@@ -148,6 +176,9 @@ public sealed class DatabaseScanStrategy(
     {
         CheckType.ColumnRange => rule.MinValue.HasValue || rule.MaxValue.HasValue,
         CheckType.ValueEquals => !string.IsNullOrWhiteSpace(rule.ExpectedValue),
+        // SqlQuery: the query (SourceTable) + the value column (TargetField) are all
+        // that's needed — Option A, every returned row is a failure (no predicate).
+        CheckType.SqlQuery    => !string.IsNullOrWhiteSpace(rule.SourceTable) && !string.IsNullOrWhiteSpace(rule.TargetField),
         _                     => false
     };
 
@@ -155,6 +186,7 @@ public sealed class DatabaseScanStrategy(
     {
         CheckType.ColumnRange => $"[{r.SourceTable}].[{r.TargetField}] ∈ [{r.MinValue?.ToString() ?? "−∞"}, {r.MaxValue?.ToString() ?? "+∞"}]",
         CheckType.ValueEquals => $"[{r.SourceTable}].[{r.TargetField}] = {r.ExpectedValue}",
+        CheckType.SqlQuery    => $"SqlQuery → [{r.TargetField}]",
         _                     => $"[{r.SourceTable}].[{r.TargetField}]"
     };
 
@@ -173,12 +205,59 @@ public sealed class DatabaseScanStrategy(
             CheckType.ValueEquals =>
                 $"[{rule.SourceTable}].[{rule.TargetField}] = {value} matches error value {rule.ExpectedValue} ({rowId})" +
                 (rule.Description is not null ? $" — {rule.Description}" : ""),
+            // Predictable, classifier-matchable shape; Description leads when set.
+            CheckType.SqlQuery =>
+                $"{rule.Description ?? "SqlQuery match"}: [{rule.TargetField}] = {value} ({rowId})",
             _ =>
                 $"[{rule.SourceTable}].[{rule.TargetField}] = {value} ({rowId})"
         };
     }
 
     // ── SQL helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// CheckType.SqlQuery path. Runs the operator's query/EXEC verbatim through
+    /// the ISqlQueryRunner seam and projects each returned row into the shared
+    /// row tuple. EVERY returned row is a failure — Option A: the operator's
+    /// WHERE/JOIN is the filter, there is no extra predicate. TargetField names
+    /// the value column shown in the message; SourceIdColumn (optional) names the
+    /// SourceId column. Columns are read BY NAME because the result shape is
+    /// operator-defined.
+    /// </summary>
+    private async Task<List<(string RowKey, object Value, string? WatermarkValue, string? SourceIdValue, string? FilePathValue)>> QuerySqlAsync(
+        string connStr, ScanCheckRule rule, CancellationToken ct)
+    {
+        var resultRows = await sqlRunner.ExecuteAsync(connStr, rule.SourceTable!, MaxSqlQueryRows, ct);
+        var rows = new List<(string, object, string?, string?, string?)>(resultRows.Count);
+
+        var rowIndex = 0;
+        foreach (var row in resultRows)
+        {
+            rowIndex++;
+
+            // Missing TargetField is a config error affecting every row — fail the
+            // scan with a clear, actionable message rather than silently producing
+            // nothing. The worker records it as a Failed scan-run for this source.
+            if (!row.TryGetValue(rule.TargetField, out var targetVal))
+                throw new InvalidOperationException(
+                    $"SqlQuery rule {rule.CheckRuleId}: result set has no column '{rule.TargetField}' (TargetField). " +
+                    $"Columns returned: {(row.Keys.Any() ? string.Join(", ", row.Keys) : "(none)")}.");
+
+            var value = targetVal ?? "NULL";
+
+            // SourceIdColumn optional; absent/empty/null → fall back to row index
+            // downstream via `srcValue ?? rowKey`.
+            string? srcVal = null;
+            if (!string.IsNullOrWhiteSpace(rule.SourceIdColumn)
+                && row.TryGetValue(rule.SourceIdColumn!, out var sv) && sv is not null)
+                srcVal = sv.ToString();
+
+            // WatermarkValue + FilePathValue are unused for SqlQuery v1.
+            rows.Add((rowIndex.ToString(), value, null, srcVal, null));
+        }
+
+        return rows;
+    }
 
     private static async Task<List<(string RowKey, object Value, string? WatermarkValue, string? SourceIdValue, string? FilePathValue)>> QueryMatchingRowsAsync(
         string connStr, string sourceTable, ScanCheckRule rule, string? watermark, CancellationToken ct)

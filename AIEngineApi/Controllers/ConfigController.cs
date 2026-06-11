@@ -565,6 +565,37 @@ public class ConfigController(
         return null;
     }
 
+    /// <summary>
+    /// SqlQuery-scoped validation (CheckType.SqlQuery), mirroring the FileContent
+    /// validator. Cheap + save-time — no SQL parsing/execution (same trust model as
+    /// the existing SourceTable: a wrong query fails clearly at scan time). For
+    /// CheckType.SqlQuery, SourceTable holds the operator-written query / "EXEC
+    /// sp_Name …". Returns a 400 on inconsistent config, else null.
+    /// </summary>
+    private IActionResult? ApplyAndValidateSqlQuery(UpsertScanCheckRuleRequest req, ScanCheckRule rule, CheckType checkType)
+    {
+        if (checkType != CheckType.SqlQuery) return null;
+
+        if (string.IsNullOrWhiteSpace(rule.SourceTable))
+            return BadRequest(new { error = "SourceQueryRequired",
+                message = "SqlQuery rules require a Source Query — a SELECT statement or 'EXEC sp_Name @p=…'." });
+
+        if (string.IsNullOrWhiteSpace(rule.TargetField))
+            return BadRequest(new { error = "TargetFieldRequired",
+                message = "SqlQuery rules require a TargetField — the result-set column whose value is shown on each failure." });
+
+        // Option A: every returned row is a failure (the operator's WHERE is the
+        // filter). The range/equality predicate, watermark, and file-path fields
+        // don't apply — null them so stale UI values can't leak onto a SqlQuery rule.
+        rule.MinValue         = null;
+        rule.MaxValue         = null;
+        rule.ExpectedValue    = null;
+        rule.WatermarkColumn  = null;
+        rule.FilePathColumn   = null;
+        rule.InputPathPattern = null;
+        return null;
+    }
+
     [HttpPost("monitored-jobs/{jobId:int}/scan-rules")]
     public async Task<IActionResult> CreateScanRule(int jobId, [FromBody] UpsertScanCheckRuleRequest req, CancellationToken ct)
     {
@@ -608,6 +639,7 @@ public class ConfigController(
             IsActive         = true,
         };
         if (ApplyAndValidateFileContent(req, rule, checkType) is { } fcError) return fcError;
+        if (ApplyAndValidateSqlQuery(req, rule, checkType) is { } sqError) return sqError;
 
         db.ScanCheckRules.Add(rule);
         await db.SaveChangesAsync(ct);
@@ -666,6 +698,7 @@ public class ConfigController(
         rule.Description      = req.Description;
         rule.IsActive         = req.IsActive;
         if (ApplyAndValidateFileContent(req, rule, checkType) is { } fcError) return fcError;
+        if (ApplyAndValidateSqlQuery(req, rule, checkType) is { } sqError) return sqError;
 
         await db.SaveChangesAsync(ct);
 
@@ -924,6 +957,7 @@ public class ConfigController(
             IsActive         = true,
         };
         if (ApplyAndValidateFileContent(req, rule, checkType) is { } fcError) return fcError;
+        if (ApplyAndValidateSqlQuery(req, rule, checkType) is { } sqError) return sqError;
 
         db.ScanCheckRules.Add(rule);
         await db.SaveChangesAsync(ct);

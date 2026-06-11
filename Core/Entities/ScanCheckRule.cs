@@ -19,7 +19,11 @@ public class ScanCheckRule
 
     public CheckType CheckType { get; set; }
 
-    /// <summary>SQL table to query for ColumnRange checks, e.g. "dbo.Orders".</summary>
+    /// <summary>
+    /// ColumnRange/ValueEquals: the SQL table to query, e.g. "dbo.Orders".
+    /// SqlQuery: repurposed to hold the operator-written query or "EXEC sp_Name @p=…"
+    /// statement (run as CommandType.Text). nvarchar(max) — may be multi-line.
+    /// </summary>
     public string? SourceTable { get; set; }
 
     /// <summary>
