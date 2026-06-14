@@ -65,6 +65,12 @@ public sealed class DatabaseScanStrategy(
         };
 
         var created = new List<JobFailure>();
+        // A single misconfigured rule (e.g. a SqlQuery whose WatermarkColumn isn't in
+        // the SELECT, or a bad table/column) must NOT abort the whole source scan and
+        // orphan failures other rules already created as unclassified. Catch per rule,
+        // keep scanning the rest, then surface the first error AFTER classify so the
+        // scan-run is still recorded Failed (visible) without losing classification.
+        Exception? ruleError = null;
 
         foreach (var rule in rules)
         {
@@ -75,6 +81,8 @@ public sealed class DatabaseScanStrategy(
                 continue;
             }
 
+          try
+          {
             // Short, stable label used for BOTH the failure's StepName (nvarchar(200))
             // and the no-watermark dedup key. For SqlQuery the SourceTable IS the
             // (possibly multi-line, multi-KB) query, so it can't serve as either —
@@ -159,16 +167,36 @@ public sealed class DatabaseScanStrategy(
             logger.LogInformation(
                 "DatabaseScan '{Job}': {Step} — {Count} row(s) matched rule {RuleId} ({CheckType})",
                 job.Name, stepName, rows.Count, rule.CheckRuleId, rule.CheckType);
+          }
+          catch (Exception ex) when (ex is not OperationCanceledException)
+          {
+              // Misconfigured/failing rule — log, remember the first, keep scanning the rest.
+              logger.LogError(ex,
+                  "DatabaseScan '{Job}': rule {RuleId} ({CheckType}) failed — skipping it, other rules continue",
+                  job.Name, rule.CheckRuleId, rule.CheckType);
+              ruleError ??= ex;
+          }
         }
 
         result.FailuresDetected = created.Count;
-        if (created.Count == 0) return result;
 
-        var classifications = await classify.ExecuteAsync(created, ct);
-        result.Classifications = classifications.Count;
+        // Classify + suggest whatever was created BEFORE surfacing any rule error, so a
+        // late-failing rule never leaves earlier rules' failures unclassified.
+        if (created.Count > 0)
+        {
+            var classifications = await classify.ExecuteAsync(created, ct);
+            result.Classifications = classifications.Count;
 
-        await suggest.ExecuteAsync(classifications, ct);
-        result.Recommendations = classifications.Count;
+            await suggest.ExecuteAsync(classifications, ct);
+            result.Recommendations = classifications.Count;
+        }
+
+        // Surface the rule failure now (scan-run recorded Failed for visibility) — after
+        // the good rules' failures are safely classified.
+        if (ruleError is not null)
+            throw new InvalidOperationException(
+                $"Scan of job '{job.Name}' completed other rules but rule(s) failed. First error: {ruleError.Message}",
+                ruleError);
 
         return result;
     }

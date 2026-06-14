@@ -42,6 +42,7 @@ public class DatabaseScanStrategySqlQueryTests
     private sealed class Harness
     {
         public readonly List<JobFailure> Saved = new();
+        public readonly List<JobFailure> Classified = new();
         public bool OpenFailureExists { get; init; }
         public string? StoredWatermark { get; init; }
         public HashSet<string> OpenSourceIds { get; init; } = new(StringComparer.OrdinalIgnoreCase);
@@ -67,7 +68,11 @@ public class DatabaseScanStrategySqlQueryTests
 
             var classify = new Mock<IClassifyJobsUseCase>();
             classify.Setup(c => c.ExecuteAsync(It.IsAny<IEnumerable<JobFailure>>(), It.IsAny<CancellationToken>()))
-                    .ReturnsAsync((IReadOnlyList<ClassificationResult>)Array.Empty<ClassificationResult>());
+                    .Returns((IEnumerable<JobFailure> fs, CancellationToken _) =>
+                    {
+                        Classified.AddRange(fs);
+                        return Task.FromResult((IReadOnlyList<ClassificationResult>)Array.Empty<ClassificationResult>());
+                    });
 
             var suggest = new Mock<IGenerateSuggestionsUseCase>();
             suggest.Setup(s => s.ExecuteAsync(It.IsAny<IEnumerable<ClassificationResult>>(), It.IsAny<CancellationToken>()))
@@ -360,5 +365,30 @@ public class DatabaseScanStrategySqlQueryTests
 
         Assert.Equal("NEW", Assert.Single(h.Saved).SourceId);
         Assert.Equal("2026-07-02 00:00:00.0000000", h.UpdatedWatermark);   // advanced to highest seen (incl. filtered/skipped)
+    }
+
+    // ── Per-rule resilience ────────────────────────────────────────────────────
+
+    [Fact] // a rule that throws (watermark column not in SELECT) must NOT abort the scan
+           // or orphan a later rule's failures — the good rule still creates AND classifies,
+           // and the scan surfaces the error afterward for visibility.
+    public async Task OneRuleThrows_LaterRuleStillCreatesAndClassifies_ScanSurfacesError()
+    {
+        var runner = new FakeSqlRunner(new[] { Row(("V", "x"), ("Id", "k")) });
+        var h = new Harness();
+        var strat = h.Build(runner);
+        // Bad rule FIRST: WatermarkColumn 'UpdateDate' isn't in the result → throws.
+        var bad  = SqlRule(30, "SELECT V, Id FROM X", "V", sourceIdColumn: "Id", watermarkColumn: "UpdateDate");
+        var good = SqlRule(31, "SELECT V, Id FROM X", "V", sourceIdColumn: "Id", desc: "Good");
+        var (job, source) = JobAndSource(bad, good);
+
+        // Scan surfaces the rule error (scan-run recorded Failed) ...
+        await Assert.ThrowsAsync<InvalidOperationException>(() => strat.ScanAsync(job, source));
+
+        // ... but the good rule (after the throwing one) still created its failure ...
+        Assert.Equal("k", Assert.Single(h.Saved).SourceId);
+        Assert.Equal("Good", h.Saved[0].StepName);
+        // ... and that failure was classified BEFORE the error surfaced (not orphaned).
+        Assert.Contains(h.Classified, f => f.SourceId == "k");
     }
 }
