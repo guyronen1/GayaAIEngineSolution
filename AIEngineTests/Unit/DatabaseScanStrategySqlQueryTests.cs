@@ -43,6 +43,9 @@ public class DatabaseScanStrategySqlQueryTests
     {
         public readonly List<JobFailure> Saved = new();
         public bool OpenFailureExists { get; init; }
+        public string? StoredWatermark { get; init; }
+        public HashSet<string> OpenSourceIds { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+        public string? UpdatedWatermark { get; private set; }
 
         public DatabaseScanStrategy Build(ISqlQueryRunner runner)
         {
@@ -52,6 +55,15 @@ public class DatabaseScanStrategySqlQueryTests
                    .Returns((JobFailure f, CancellationToken _) => { f.FailureId = next++; Saved.Add(f); return Task.FromResult(f); });
             jobRepo.Setup(r => r.HasOpenFailureAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
                    .ReturnsAsync(OpenFailureExists);
+            jobRepo.Setup(r => r.GetOpenFailureSourceIdsAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                   .ReturnsAsync(OpenSourceIds);
+
+            var watermarks = new Mock<IScanWatermarkRepository>();
+            watermarks.Setup(w => w.GetDbWatermarkAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                      .ReturnsAsync(StoredWatermark);
+            watermarks.Setup(w => w.UpdateDbWatermarkAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                      .Callback((int _, string v, CancellationToken _) => UpdatedWatermark = v)
+                      .Returns(Task.CompletedTask);
 
             var classify = new Mock<IClassifyJobsUseCase>();
             classify.Setup(c => c.ExecuteAsync(It.IsAny<IEnumerable<JobFailure>>(), It.IsAny<CancellationToken>()))
@@ -66,7 +78,7 @@ public class DatabaseScanStrategySqlQueryTests
                 .Build();
 
             return new DatabaseScanStrategy(
-                config, jobRepo.Object, new Mock<IScanWatermarkRepository>().Object,
+                config, jobRepo.Object, watermarks.Object,
                 classify.Object, suggest.Object, runner,
                 NullLogger<DatabaseScanStrategy>.Instance);
         }
@@ -78,18 +90,19 @@ public class DatabaseScanStrategySqlQueryTests
         => cols.ToDictionary(c => c.Name, c => c.Value, StringComparer.OrdinalIgnoreCase);
 
     private static ScanCheckRule SqlRule(int id, string query, string targetField,
-        string? sourceIdColumn = null, string? desc = null)
+        string? sourceIdColumn = null, string? desc = null, string? watermarkColumn = null)
         => new()
         {
-            CheckRuleId    = id,
-            MonitoredJobId = 1,
-            ScanSourceId   = 1,
-            CheckType      = CheckType.SqlQuery,
-            SourceTable    = query,
-            TargetField    = targetField,
-            SourceIdColumn = sourceIdColumn,
-            Description    = desc,
-            IsActive       = true,
+            CheckRuleId     = id,
+            MonitoredJobId  = 1,
+            ScanSourceId    = 1,
+            CheckType       = CheckType.SqlQuery,
+            SourceTable     = query,
+            TargetField     = targetField,
+            SourceIdColumn  = sourceIdColumn,
+            WatermarkColumn = watermarkColumn,
+            Description     = desc,
+            IsActive        = true,
         };
 
     private static (MonitoredJob Job, ScanSource Source) JobAndSource(params ScanCheckRule[] rules)
@@ -223,17 +236,129 @@ public class DatabaseScanStrategySqlQueryTests
         Assert.Empty(h.Saved);
     }
 
-    [Fact]
-    public async Task OpenFailureExists_DedupSkipsCreation()
+    [Fact] // No SourceId, no watermark → coarse per-rule dedup (whole rule skipped while open)
+    public async Task NoKeysConfigured_OpenFailureExists_CoarseDedupSkipsRule()
     {
-        var runner = new FakeSqlRunner(new[] { Row(("V", "x"), ("Id", "k")) });
+        var runner = new FakeSqlRunner(new[] { Row(("V", "x")) });
         var h = new Harness { OpenFailureExists = true };
         var strat = h.Build(runner);
-        var (job, source) = JobAndSource(SqlRule(17, "SELECT V, Id FROM X", "V", sourceIdColumn: "Id", desc: "D"));
+        var (job, source) = JobAndSource(SqlRule(17, "SELECT V FROM X", "V", desc: "D"));   // no sourceId/watermark
 
         var result = await strat.ScanAsync(job, source);
 
         Assert.Equal(0, result.FailuresDetected);
         Assert.Empty(h.Saved);
+    }
+
+    // ── Per-SourceId dedup ─────────────────────────────────────────────────────
+
+    [Fact] // a row whose SourceId already has an open failure is skipped; a NEW id fires
+    public async Task PerSourceId_OpenIdSkipped_NewIdStillFires()
+    {
+        var runner = new FakeSqlRunner(new[]
+        {
+            Row(("V", 1), ("Id", "ORD-1")),   // already open → skip
+            Row(("V", 1), ("Id", "ORD-2")),   // new → fire
+        });
+        var h = new Harness { OpenSourceIds = new(StringComparer.OrdinalIgnoreCase) { "ORD-1" } };
+        var strat = h.Build(runner);
+        var (job, source) = JobAndSource(SqlRule(20, "SELECT V, Id FROM X", "V", sourceIdColumn: "Id", desc: "Stuck"));
+
+        var result = await strat.ScanAsync(job, source);
+
+        Assert.Equal(1, result.FailuresDetected);
+        Assert.Equal("ORD-2", Assert.Single(h.Saved).SourceId);
+    }
+
+    [Fact] // open set is lowercased, row id uppercased — must still match (no duplicate)
+    public async Task PerSourceId_DedupIsCaseInsensitive()
+    {
+        var runner = new FakeSqlRunner(new[] { Row(("V", 1), ("Id", "6E02EF59-AAAA")) });
+        var h = new Harness { OpenSourceIds = new(StringComparer.OrdinalIgnoreCase) { "6e02ef59-aaaa" } };
+        var strat = h.Build(runner);
+        var (job, source) = JobAndSource(SqlRule(21, "SELECT V, Id FROM X", "V", sourceIdColumn: "Id"));
+
+        var result = await strat.ScanAsync(job, source);
+
+        Assert.Equal(0, result.FailuresDetected);
+    }
+
+    // ── Watermark (in-memory incremental) ──────────────────────────────────────
+
+    [Fact] // rows at/below the stored mark are filtered; only newer ones fire; mark advances to max seen
+    public async Task Watermark_FiltersOldRows_FiresNew_AndAdvances()
+    {
+        var runner = new FakeSqlRunner(new[]
+        {
+            Row(("V", 1), ("Id", "A"), ("UpdateDate", new DateTime(2026, 5, 1))),   // old → filtered
+            Row(("V", 1), ("Id", "B"), ("UpdateDate", new DateTime(2026, 7, 1))),   // new → fires
+        });
+        var h = new Harness { StoredWatermark = "2026-06-01 00:00:00.0000000" };
+        var strat = h.Build(runner);
+        var (job, source) = JobAndSource(SqlRule(22, "SELECT V, Id, UpdateDate FROM X", "V",
+            sourceIdColumn: "Id", watermarkColumn: "UpdateDate"));
+
+        var result = await strat.ScanAsync(job, source);
+
+        Assert.Equal(1, result.FailuresDetected);
+        Assert.Equal("B", Assert.Single(h.Saved).SourceId);
+        Assert.Equal("2026-07-01 00:00:00.0000000", h.UpdatedWatermark);   // advanced to highest seen
+    }
+
+    [Fact] // first scan (no stored mark) fires everything and sets the baseline
+    public async Task Watermark_FirstScan_FiresAll_SetsBaseline()
+    {
+        var runner = new FakeSqlRunner(new[]
+        {
+            Row(("V", 1), ("Id", "A"), ("UpdateDate", new DateTime(2026, 5, 1))),
+            Row(("V", 1), ("Id", "B"), ("UpdateDate", new DateTime(2026, 7, 1))),
+        });
+        var h = new Harness { StoredWatermark = null };
+        var strat = h.Build(runner);
+        var (job, source) = JobAndSource(SqlRule(23, "SELECT V, Id, UpdateDate FROM X", "V",
+            sourceIdColumn: "Id", watermarkColumn: "UpdateDate"));
+
+        var result = await strat.ScanAsync(job, source);
+
+        Assert.Equal(2, result.FailuresDetected);
+        Assert.Equal("2026-07-01 00:00:00.0000000", h.UpdatedWatermark);
+    }
+
+    [Fact] // watermark configured but the column isn't in the result set → clear config error
+    public async Task Watermark_ColumnMissingFromResult_ThrowsClearError()
+    {
+        var runner = new FakeSqlRunner(new[] { Row(("V", 1), ("Id", "A")) });   // no UpdateDate
+        var h = new Harness();
+        var strat = h.Build(runner);
+        var (job, source) = JobAndSource(SqlRule(24, "SELECT V, Id FROM X", "V",
+            sourceIdColumn: "Id", watermarkColumn: "UpdateDate"));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => strat.ScanAsync(job, source));
+        Assert.Contains("UpdateDate", ex.Message);
+        Assert.Contains("WatermarkColumn", ex.Message);
+    }
+
+    [Fact] // watermark + per-id compose: old row filtered by watermark, open id skipped, the one fresh+new row fires
+    public async Task WatermarkAndSourceId_Compose()
+    {
+        var runner = new FakeSqlRunner(new[]
+        {
+            Row(("V", 1), ("Id", "OLD"), ("UpdateDate", new DateTime(2026, 5, 1))),   // filtered by watermark
+            Row(("V", 1), ("Id", "OPEN"),("UpdateDate", new DateTime(2026, 7, 1))),   // new ts but id already open → skip
+            Row(("V", 1), ("Id", "NEW"), ("UpdateDate", new DateTime(2026, 7, 2))),   // new ts + new id → fire
+        });
+        var h = new Harness
+        {
+            StoredWatermark = "2026-06-01 00:00:00.0000000",
+            OpenSourceIds   = new(StringComparer.OrdinalIgnoreCase) { "OPEN" },
+        };
+        var strat = h.Build(runner);
+        var (job, source) = JobAndSource(SqlRule(25, "SELECT V, Id, UpdateDate FROM X", "V",
+            sourceIdColumn: "Id", watermarkColumn: "UpdateDate"));
+
+        var result = await strat.ScanAsync(job, source);
+
+        Assert.Equal("NEW", Assert.Single(h.Saved).SourceId);
+        Assert.Equal("2026-07-02 00:00:00.0000000", h.UpdatedWatermark);   // advanced to highest seen (incl. filtered/skipped)
     }
 }

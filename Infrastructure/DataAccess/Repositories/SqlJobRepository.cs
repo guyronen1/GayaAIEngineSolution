@@ -75,6 +75,23 @@ public sealed class SqlJobRepository(IDbContextFactory<AiDbContext> factory) : I
             f.Status         != JobStatus.Resolved, ct);
     }
 
+    public async Task<HashSet<string>> GetOpenFailureSourceIdsAsync(
+        int monitoredJobId, string stepName, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        var ids = await db.JobFailures
+            .Where(f => f.MonitoredJobId == monitoredJobId &&
+                        f.StepName       == stepName       &&
+                        f.Status         != JobStatus.Resolved &&
+                        f.SourceId       != null)
+            .Select(f => f.SourceId!)
+            .Distinct()
+            .ToListAsync(ct);
+        // Case-insensitive: failures store lowercased GUIDs while the source row's
+        // natural key may be uppercase — an ordinal match would miss and duplicate.
+        return new HashSet<string>(ids, StringComparer.OrdinalIgnoreCase);
+    }
+
     public async Task<PagedResult<JobFailure>> GetPagedAsync(
         int page, int pageSize, string? view = null, CancellationToken ct = default)
     {

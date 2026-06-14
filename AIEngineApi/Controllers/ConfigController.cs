@@ -602,12 +602,17 @@ public class ConfigController(
                 message = "SqlQuery rules require a TargetField — the result-set column whose value is shown on each failure." });
 
         // Option A: every returned row is a failure (the operator's WHERE is the
-        // filter). The range/equality predicate, watermark, and file-path fields
-        // don't apply — null them so stale UI values can't leak onto a SqlQuery rule.
+        // filter). The range/equality predicate and file-path fields don't apply —
+        // null them so stale UI values can't leak onto a SqlQuery rule.
+        //
+        // WatermarkColumn and SourceIdColumn ARE kept: SqlQuery now does incremental
+        // watermarking + per-SourceId dedup in-memory (parity with ValueEquals). Both
+        // are optional and name result-set columns; we can't validate their presence
+        // here (the result shape is only known at scan time — a missing column then
+        // fails the scan with a clear message).
         rule.MinValue         = null;
         rule.MaxValue         = null;
         rule.ExpectedValue    = null;
-        rule.WatermarkColumn  = null;
         rule.FilePathColumn   = null;
         rule.InputPathPattern = null;
         return null;

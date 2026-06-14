@@ -1,4 +1,5 @@
-﻿using MaiaAI.Core.Entities;
+﻿using System.Globalization;
+using MaiaAI.Core.Entities;
 using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Interfaces.UseCases;
@@ -87,46 +88,48 @@ public sealed class DatabaseScanStrategy(
                 ? $"db://{conn}/query"
                 : $"db://{conn}/{rule.SourceTable}";
 
-            // Get the current watermark for this rule (null = first scan ever).
-            // SqlQuery rules carry no WatermarkColumn (deferred), so this is null.
-            string? watermark = rule.WatermarkColumn is not null
-                ? await watermarks.GetDbWatermarkAsync(rule.CheckRuleId, ct)
-                : null;
+            List<(string RowKey, object Value, string? WatermarkValue, string? SourceIdValue, string? FilePathValue)> rows;
 
-            var rows = rule.CheckType == CheckType.SqlQuery
-                ? await QuerySqlAsync(connStr, rule, ct)
-                : await QueryMatchingRowsAsync(connStr, rule.SourceTable!, rule, watermark, ct);
-
-            if (rule.CheckType == CheckType.SqlQuery && rows.Count >= MaxSqlQueryRows)
-                logger.LogWarning(
-                    "DatabaseScan '{Job}': SqlQuery rule {RuleId} hit the {Cap}-row cap — results may be truncated.",
-                    job.Name, rule.CheckRuleId, MaxSqlQueryRows);
-
-            // Advance the watermark to the highest WatermarkColumn value seen this scan.
-            // When zero rows matched, take MAX over rows that satisfy the rule's filter —
-            // NOT MAX over the whole table, because a future-dated healthy row would jump
-            // the watermark past any current-dated unhealthy row inserted next.
-            // (SqlQuery has no watermark, so this whole block is skipped.)
-            if (rule.WatermarkColumn is not null)
+            if (rule.CheckType == CheckType.SqlQuery)
             {
-                var newWatermark = rows.Count > 0
-                    ? rows.Max(r => r.WatermarkValue ?? string.Empty)
-                    : await QueryFilteredMaxAsync(connStr, rule.SourceTable!, rule.WatermarkColumn, rule, ct);
-
-                if (newWatermark is not null)
-                    await watermarks.UpdateDbWatermarkAsync(rule.CheckRuleId, newWatermark, ct);
+                // SqlQuery owns its own watermark + per-SourceId dedup INTERNALLY. The
+                // operator's SQL/EXEC can't be safely rewritten to push a watermark
+                // filter into the query (could be an EXEC), so both run in-memory on the
+                // returned rows. See ScanSqlRuleAsync.
+                rows = await ScanSqlRuleAsync(connStr, job, rule, stepName, ct);
             }
-            else if (rows.Count > 0)
+            else
             {
-                // No watermark column configured — fall back to open-failure dedup
-                // keyed on StepName (table name for table rules, the SqlQuery label
-                // for SqlQuery rules).
-                if (await jobRepo.HasOpenFailureAsync(job.MonitoredJobId, stepName, rule.TargetField, ct))
+                // Table rules (ColumnRange / ValueEquals): the watermark filter is pushed
+                // into the generated SQL; coarse open-failure dedup only when no watermark.
+                string? watermark = rule.WatermarkColumn is not null
+                    ? await watermarks.GetDbWatermarkAsync(rule.CheckRuleId, ct)
+                    : null;
+
+                rows = await QueryMatchingRowsAsync(connStr, rule.SourceTable!, rule, watermark, ct);
+
+                // Advance the watermark to the highest WatermarkColumn value seen this scan.
+                // When zero rows matched, take MAX over rows that satisfy the rule's filter —
+                // NOT MAX over the whole table, because a future-dated healthy row would jump
+                // the watermark past any current-dated unhealthy row inserted next.
+                if (rule.WatermarkColumn is not null)
                 {
-                    logger.LogDebug(
-                        "DatabaseScan '{Job}': open failure already exists for '{Step}' — skipping",
-                        job.Name, stepName);
-                    continue;
+                    var newWatermark = rows.Count > 0
+                        ? rows.Max(r => r.WatermarkValue ?? string.Empty)
+                        : await QueryFilteredMaxAsync(connStr, rule.SourceTable!, rule.WatermarkColumn, rule, ct);
+
+                    if (newWatermark is not null)
+                        await watermarks.UpdateDbWatermarkAsync(rule.CheckRuleId, newWatermark, ct);
+                }
+                else if (rows.Count > 0)
+                {
+                    if (await jobRepo.HasOpenFailureAsync(job.MonitoredJobId, stepName, rule.TargetField, ct))
+                    {
+                        logger.LogDebug(
+                            "DatabaseScan '{Job}': open failure already exists for '{Step}' — skipping",
+                            job.Name, stepName);
+                        continue;
+                    }
                 }
             }
 
@@ -216,20 +219,36 @@ public sealed class DatabaseScanStrategy(
     // ── SQL helpers ───────────────────────────────────────────────────────────
 
     /// <summary>
-    /// CheckType.SqlQuery path. Runs the operator's query/EXEC verbatim through
-    /// the ISqlQueryRunner seam and projects each returned row into the shared
-    /// row tuple. EVERY returned row is a failure — Option A: the operator's
-    /// WHERE/JOIN is the filter, there is no extra predicate. TargetField names
-    /// the value column shown in the message; SourceIdColumn (optional) names the
-    /// SourceId column. Columns are read BY NAME because the result shape is
-    /// operator-defined.
+    /// CheckType.SqlQuery path. Runs the operator's query/EXEC verbatim through the
+    /// ISqlQueryRunner seam; EVERY returned row is a candidate failure (Option A —
+    /// the operator's WHERE/JOIN is the filter). Two dedup layers run IN-MEMORY here
+    /// (the operator SQL can't be rewritten to push them into the query):
+    ///   • Watermark (when WatermarkColumn set): keep only rows whose value exceeds
+    ///     the stored mark; advance the mark to the highest seen. Parity with the
+    ///     ColumnRange/ValueEquals watermark, just applied after the query.
+    ///   • Per-SourceId dedup (when SourceIdColumn set): drop rows whose SourceId
+    ///     already has an open failure — so a NEW row fires even while an unrelated
+    ///     row's failure is still open (the gap the coarse per-rule dedup had).
+    /// Both compose; with neither configured it falls back to the coarse per-rule
+    /// open-failure dedup. Columns are read BY NAME (operator-defined result shape).
     /// </summary>
-    private async Task<List<(string RowKey, object Value, string? WatermarkValue, string? SourceIdValue, string? FilePathValue)>> QuerySqlAsync(
-        string connStr, ScanCheckRule rule, CancellationToken ct)
+    private async Task<List<(string RowKey, object Value, string? WatermarkValue, string? SourceIdValue, string? FilePathValue)>> ScanSqlRuleAsync(
+        string connStr, MonitoredJob job, ScanCheckRule rule, string stepName, CancellationToken ct)
     {
-        var resultRows = await sqlRunner.ExecuteAsync(connStr, rule.SourceTable!, MaxSqlQueryRows, ct);
-        var rows = new List<(string, object, string?, string?, string?)>(resultRows.Count);
+        var hasWatermark = !string.IsNullOrWhiteSpace(rule.WatermarkColumn);
+        var hasSourceId  = !string.IsNullOrWhiteSpace(rule.SourceIdColumn);
 
+        var resultRows = await sqlRunner.ExecuteAsync(connStr, rule.SourceTable!, MaxSqlQueryRows, ct);
+        if (resultRows.Count >= MaxSqlQueryRows)
+            logger.LogWarning(
+                "DatabaseScan '{Job}': SqlQuery rule {RuleId} hit the {Cap}-row cap — results may be truncated. " +
+                "For a watermarked rule with a large result set, add 'ORDER BY {Wm} ASC' to the query so the cap reads oldest-first.",
+                job.Name, rule.CheckRuleId, MaxSqlQueryRows, rule.WatermarkColumn ?? "<watermark>");
+
+        var stored = hasWatermark ? await watermarks.GetDbWatermarkAsync(rule.CheckRuleId, ct) : null;
+
+        object? maxWm = null;
+        var candidates = new List<(string RowKey, object Value, string? WatermarkValue, string? SourceIdValue, string? FilePathValue)>();
         var rowIndex = 0;
         foreach (var row in resultRows)
         {
@@ -248,16 +267,100 @@ public sealed class DatabaseScanStrategy(
             // SourceIdColumn optional; absent/empty/null → fall back to row index
             // downstream via `srcValue ?? rowKey`.
             string? srcVal = null;
-            if (!string.IsNullOrWhiteSpace(rule.SourceIdColumn)
-                && row.TryGetValue(rule.SourceIdColumn!, out var sv) && sv is not null)
+            if (hasSourceId && row.TryGetValue(rule.SourceIdColumn!, out var sv) && sv is not null)
                 srcVal = sv.ToString();
 
-            // WatermarkValue + FilePathValue are unused for SqlQuery v1.
-            rows.Add((rowIndex.ToString(), value, null, srcVal, null));
+            string? wmCanonical = null;
+            if (hasWatermark)
+            {
+                if (!row.TryGetValue(rule.WatermarkColumn!, out var wmRaw))
+                    throw new InvalidOperationException(
+                        $"SqlQuery rule {rule.CheckRuleId}: result set has no column '{rule.WatermarkColumn}' (WatermarkColumn). " +
+                        $"Add it to the SELECT, or clear the Watermark Column. Columns returned: {string.Join(", ", row.Keys)}.");
+
+                // Track the highest value over ALL returned rows so handled rows aren't
+                // re-examined next tick, even ones we filter out below.
+                if (wmRaw is not null && (maxWm is null || ValueGreater(wmRaw, maxWm)))
+                    maxWm = wmRaw;
+
+                // Incremental filter: skip rows at or below the stored mark.
+                if (!IsAfter(wmRaw, stored)) continue;
+
+                wmCanonical = wmRaw is not null ? Canonical(wmRaw) : null;
+            }
+
+            candidates.Add((rowIndex.ToString(), value, wmCanonical, srcVal, null));
         }
 
-        return rows;
+        // Advance the watermark to the highest value seen this scan (if it advanced).
+        if (hasWatermark && maxWm is not null && IsAfter(maxWm, stored))
+            await watermarks.UpdateDbWatermarkAsync(rule.CheckRuleId, Canonical(maxWm), ct);
+
+        if (candidates.Count == 0) return candidates;
+
+        if (hasSourceId)
+        {
+            // Per-row dedup: drop candidates whose SourceId already has an open failure.
+            var openIds = await jobRepo.GetOpenFailureSourceIdsAsync(job.MonitoredJobId, stepName, ct);
+            if (openIds.Count > 0)
+                candidates = candidates
+                    .Where(c => c.SourceIdValue is null || !openIds.Contains(c.SourceIdValue))
+                    .ToList();
+        }
+        else if (!hasWatermark)
+        {
+            // Neither a stable key nor a watermark — fall back to the coarse per-rule
+            // dedup: skip the whole rule while any failure with this label is open.
+            if (await jobRepo.HasOpenFailureAsync(job.MonitoredJobId, stepName, rule.TargetField, ct))
+            {
+                logger.LogDebug(
+                    "DatabaseScan '{Job}': open failure already exists for '{Step}' — skipping",
+                    job.Name, stepName);
+                return [];
+            }
+        }
+
+        return candidates;
     }
+
+    // ── Watermark value comparison (in-memory, SqlQuery only) ──────────────────
+    // Table rules push '[col] > @Watermark' into SQL and let the server compare by
+    // native type. SqlQuery can't, so we compare here: DateTime and numerics compare
+    // BY VALUE (not lexically — "9" vs "10"); anything else falls back to ordinal.
+
+    /// <summary>True when <paramref name="value"/> is strictly newer than the stored
+    /// watermark string. Null value → false; null/empty stored → true (first scan).</summary>
+    private static bool IsAfter(object? value, string? storedWatermark)
+    {
+        if (value is null) return false;
+        if (string.IsNullOrEmpty(storedWatermark)) return true;
+        switch (value)
+        {
+            case DateTime dt:
+                return !DateTime.TryParse(storedWatermark, CultureInfo.InvariantCulture, DateTimeStyles.None, out var sdt) || dt > sdt;
+            case byte or sbyte or short or ushort or int or uint or long or ulong or decimal or float or double:
+                var d = Convert.ToDecimal(value, CultureInfo.InvariantCulture);
+                return !decimal.TryParse(storedWatermark, NumberStyles.Any, CultureInfo.InvariantCulture, out var sd) || d > sd;
+            default:
+                return string.CompareOrdinal(value.ToString(), storedWatermark) > 0;
+        }
+    }
+
+    /// <summary>True when a &gt; b for two values of the same watermark column.</summary>
+    private static bool ValueGreater(object a, object b)
+    {
+        if (a is DateTime da && b is DateTime db) return da > db;
+        try { return Convert.ToDecimal(a, CultureInfo.InvariantCulture) > Convert.ToDecimal(b, CultureInfo.InvariantCulture); }
+        catch { return string.CompareOrdinal(a.ToString(), b.ToString()) > 0; }
+    }
+
+    /// <summary>Sortable, round-trippable string form for the watermark store.
+    /// DateTime uses the same ISO shape as the table path's CONVERT(..., 121).</summary>
+    private static string Canonical(object value) => value switch
+    {
+        DateTime dt => dt.ToString("yyyy-MM-dd HH:mm:ss.fffffff", CultureInfo.InvariantCulture),
+        _           => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty
+    };
 
     private static async Task<List<(string RowKey, object Value, string? WatermarkValue, string? SourceIdValue, string? FilePathValue)>> QueryMatchingRowsAsync(
         string connStr, string sourceTable, ScanCheckRule rule, string? watermark, CancellationToken ct)

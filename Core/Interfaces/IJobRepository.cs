@@ -36,4 +36,13 @@ public interface IJobRepository
     /// so database scans don't create duplicate failures for persistent data issues.
     /// </summary>
     Task<bool> HasOpenFailureAsync(int monitoredJobId, string sourceTable, string targetField, CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns the set of SourceIds that currently have a non-resolved failure for this
+    /// (job, StepName) — the per-row dedup key for SqlQuery scans. Lets a new row fire
+    /// while an unrelated row's failure is still open (unlike the coarse per-rule
+    /// <see cref="HasOpenFailureAsync"/>). Case-insensitive: source GUIDs round-trip in
+    /// different cases. One batched query, not one per row.
+    /// </summary>
+    Task<HashSet<string>> GetOpenFailureSourceIdsAsync(int monitoredJobId, string stepName, CancellationToken ct = default);
 }
