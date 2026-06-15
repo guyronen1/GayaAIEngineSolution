@@ -394,18 +394,19 @@ public class ConfigController(
     {
         if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
+        // Tier 2.5 Option 1: a MonitoredJob is PURE IDENTITY. Scan config (ScanType,
+        // folder, pattern, connection, url) lives on its ScanSources, added on the
+        // config screen — NOT here. The job-level scan columns are vestigial (kept until
+        // the cleanup migration drops them). ScanTypeId is set to a fixed placeholder
+        // because the column is non-nullable with a FK; it is never read for scanning or
+        // lease duration anymore (the worker reads ScanSources; the lease takes MAX over
+        // active sources). The scan fields on the request are ignored.
         var job = new MonitoredJob
         {
             Name                   = req.Name,
             DisplayName            = req.DisplayName,
             JobTypeId              = req.JobTypeId,
-            ScanTypeId             = req.ScanTypeId,
-            LogFolder              = req.LogFolder,
-            SearchPatterns         = req.SearchPatterns,
-            InputFolder            = req.InputFolder,
-            IncludeSubfolders      = req.IncludeSubfolders,
-            ConnectionName         = req.ConnectionName,
-            LogSourceUrl           = req.LogSourceUrl,
+            ScanTypeId             = 1,   // vestigial placeholder (FK-satisfying); sources own scan type
             PollingIntervalSeconds = req.PollingIntervalSeconds,
             IsActive               = req.IsActive,
             Description            = req.Description,
@@ -418,7 +419,7 @@ public class ConfigController(
             entityId:   saved.MonitoredJobId.ToString(),
             eventType:  "MonitoredJobCreated",
             actor:      req.OperatorId,
-            detail:     $"Created MonitoredJob '{saved.Name}' (JobTypeId={saved.JobTypeId}, ScanTypeId={saved.ScanTypeId}, PollingIntervalSeconds={saved.PollingIntervalSeconds}, IsActive={FormatValue(saved.IsActive)})",
+            detail:     $"Created MonitoredJob '{saved.Name}' (JobTypeId={saved.JobTypeId}, PollingIntervalSeconds={saved.PollingIntervalSeconds}, IsActive={FormatValue(saved.IsActive)})",
             ct: ct);
 
         return Ok(new { saved.MonitoredJobId });
@@ -432,17 +433,13 @@ public class ConfigController(
         var job = await jobRepo.GetByIdAsync(id, ct);
         if (job is null) return NotFound();
 
-        // Snapshot before mutation for the audit diff.
+        // Snapshot before mutation for the audit diff. Tier 2.5 Option 1: a job is pure
+        // identity — scan config (ScanType/folder/pattern/connection/url) lives on its
+        // ScanSources and is NOT edited here. Those columns are left untouched (preserved
+        // at their backfilled values until the cleanup migration drops them).
         var beforeName           = job.Name;
         var beforeDisplayName    = job.DisplayName;
         var beforeJobTypeId      = job.JobTypeId;
-        var beforeScanTypeId     = job.ScanTypeId;
-        var beforeLogFolder      = job.LogFolder;
-        var beforeSearchPatterns = job.SearchPatterns;
-        var beforeInputFolder    = job.InputFolder;
-        var beforeIncludeSubfolders = job.IncludeSubfolders;
-        var beforeConnectionName = job.ConnectionName;
-        var beforeLogSourceUrl   = job.LogSourceUrl;
         var beforePollingInterval= job.PollingIntervalSeconds;
         var beforeIsActive       = job.IsActive;
         var beforeDescription    = job.Description;
@@ -450,13 +447,6 @@ public class ConfigController(
         job.Name                   = req.Name;
         job.DisplayName            = req.DisplayName;
         job.JobTypeId              = req.JobTypeId;
-        job.ScanTypeId             = req.ScanTypeId;
-        job.LogFolder              = req.LogFolder;
-        job.SearchPatterns         = req.SearchPatterns;
-        job.InputFolder            = req.InputFolder;
-        job.IncludeSubfolders      = req.IncludeSubfolders;
-        job.ConnectionName         = req.ConnectionName;
-        job.LogSourceUrl           = req.LogSourceUrl;
         job.PollingIntervalSeconds = req.PollingIntervalSeconds;
         job.IsActive               = req.IsActive;
         job.Description            = req.Description;
@@ -467,13 +457,6 @@ public class ConfigController(
             ("Name",                   beforeName,            job.Name),
             ("DisplayName",            beforeDisplayName,     job.DisplayName),
             ("JobTypeId",              beforeJobTypeId,       job.JobTypeId),
-            ("ScanTypeId",             beforeScanTypeId,      job.ScanTypeId),
-            ("LogFolder",              beforeLogFolder,       job.LogFolder),
-            ("SearchPatterns",         beforeSearchPatterns,  job.SearchPatterns),
-            ("InputFolder",            beforeInputFolder,     job.InputFolder),
-            ("IncludeSubfolders",      beforeIncludeSubfolders, job.IncludeSubfolders),
-            ("ConnectionName",         beforeConnectionName,  job.ConnectionName),
-            ("LogSourceUrl",           beforeLogSourceUrl,    job.LogSourceUrl),
             ("PollingIntervalSeconds", beforePollingInterval, job.PollingIntervalSeconds),
             ("IsActive",               beforeIsActive,        job.IsActive),
             ("Description",            beforeDescription,     job.Description));

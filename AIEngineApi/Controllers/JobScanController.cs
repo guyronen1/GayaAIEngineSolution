@@ -123,7 +123,12 @@ public class JobScanController(
     /// </summary>
     private async Task<ScanResult> RunJobSourcesAsync(MonitoredJob job, CancellationToken ct)
     {
-        var agg = new ScanResult { JobName = job.Name, ScanType = job.ScanType, Detail = string.Empty };
+        // Tier 2.5 Option 1: the job has no authoritative scan type — derive the
+        // aggregate's representative type from its first active source (the per-source
+        // Detail below lists them all). Falls back to the vestigial job.ScanType only if
+        // there are no active sources (scan-all can reach here with zero).
+        var firstSource = job.ScanSources.FirstOrDefault(s => s.IsActive);
+        var agg = new ScanResult { JobName = job.Name, ScanType = firstSource?.ScanType ?? job.ScanType, Detail = string.Empty };
         var details = new List<string>();
 
         foreach (var source in job.ScanSources.Where(s => s.IsActive))

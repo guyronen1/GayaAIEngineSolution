@@ -28,8 +28,20 @@ public sealed class SqlMonitoredJobLeaseRepository(IDbContextFactory<AiDbContext
             inserted.LeasedUntil     AS LeasedUntil
         FROM dbo.MonitoredJobLeases L WITH (READPAST, UPDLOCK, ROWLOCK)
         JOIN dbo.MonitoredJobs      J ON J.MonitoredJobId = L.MonitoredJobId
-        JOIN dbo.ScanTypes          S ON S.ScanTypeId     = J.ScanTypeId
+        -- Tier 2.5: lease duration = MAX over the job's ACTIVE sources' ScanType
+        -- durations. The job-level ScanTypeId is no longer authoritative (a job is a
+        -- container of typed sources). Single-source jobs => MAX of one => byte-identical
+        -- to the old J.ScanTypeId lookup. MAX over zero rows yields a single NULL row, so
+        -- the IS NOT NULL guard below excludes jobs with no active sources from being
+        -- claimed at all (nothing to scan — no futile claim/release churn).
+        CROSS APPLY (
+            SELECT MAX(st.LeaseDurationSeconds) AS LeaseDurationSeconds
+            FROM dbo.ScanSources src
+            JOIN dbo.ScanTypes  st ON st.ScanTypeId = src.ScanTypeId
+            WHERE src.MonitoredJobId = L.MonitoredJobId AND src.IsActive = 1
+        ) S
         WHERE J.IsActive = 1
+          AND S.LeaseDurationSeconds IS NOT NULL
           AND L.NextEligibleAt <= @now
           AND (L.LeasedUntil IS NULL OR L.LeasedUntil < @now);
         """;
