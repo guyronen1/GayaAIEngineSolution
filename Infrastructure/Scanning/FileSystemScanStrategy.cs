@@ -68,14 +68,31 @@ public sealed class FileSystemScanStrategy(
 
         if (keywordRules.Count == 0)
         {
-            // No keyword rules — full pipeline mode (scan all log lines)
+            // No keyword rules — full pipeline mode (scan all log lines). One failing
+            // pattern must not abort the others; remember the first error and surface
+            // it after, so the scan-run is still recorded Failed (visible).
+            Exception? patternError = null;
             foreach (var pattern in patterns)
             {
-                var r = await pipeline.ExecuteAsync(source.LogFolder, pattern, false, ct);
-                result.FailuresDetected += r.JobsCreated;
-                result.Classifications  += r.Classifications;
-                result.Recommendations  += r.Recommendations;
+                try
+                {
+                    var r = await pipeline.ExecuteAsync(source.LogFolder, pattern, false, ct);
+                    result.FailuresDetected += r.JobsCreated;
+                    result.Classifications  += r.Classifications;
+                    result.Recommendations  += r.Recommendations;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogError(ex,
+                        "FileSystemScan '{Job}': pipeline pattern '{Pattern}' failed — skipping it, other patterns continue",
+                        job.Name, pattern);
+                    patternError ??= ex;
+                }
             }
+            if (patternError is not null)
+                throw new InvalidOperationException(
+                    $"Scan of job '{job.Name}' completed other patterns but pattern(s) failed. First error: {patternError.Message}",
+                    patternError);
             return result;
         }
 
@@ -87,6 +104,11 @@ public sealed class FileSystemScanStrategy(
         }
 
         var created = new List<JobFailure>();
+        // A single unreadable file (e.g. IOException from ReadNewContentAsync on a
+        // locked/rotating log) must NOT abort the whole source scan and orphan the
+        // failures other files already produced (classify runs only after the loop).
+        // Catch per file, keep scanning, surface the first error AFTER classify.
+        Exception? fileError = null;
 
         // Enumerate ALL files once per scan tick; filter by pattern in code
         // using the FilenamePattern DSL (NOT Directory.GetFiles's native glob,
@@ -106,6 +128,8 @@ public sealed class FileSystemScanStrategy(
 
             foreach (var file in files)
             {
+              try
+              {
                 var (content, newOffset) = await ReadNewContentAsync(job.MonitoredJobId, file, ct);
                 if (string.IsNullOrWhiteSpace(content))
                 {
@@ -193,17 +217,34 @@ public sealed class FileSystemScanStrategy(
                 }
 
                 await watermarks.UpdateFileOffsetAsync(job.MonitoredJobId, file, newOffset, ct);
+              }
+              catch (Exception ex) when (ex is not OperationCanceledException)
+              {
+                  logger.LogError(ex,
+                      "FileSystemScan '{Job}': file {File} failed — skipping it, other files continue",
+                      job.Name, file);
+                  fileError ??= ex;
+              }
             }
         }
 
         result.FailuresDetected = created.Count;
-        if (created.Count == 0) return result;
 
-        var classifications = await classify.ExecuteAsync(created, ct);
-        result.Classifications = classifications.Count;
+        // Classify + suggest whatever was created BEFORE surfacing any file error, so a
+        // late-failing file never leaves earlier files' failures unclassified.
+        if (created.Count > 0)
+        {
+            var classifications = await classify.ExecuteAsync(created, ct);
+            result.Classifications = classifications.Count;
 
-        await suggest.ExecuteAsync(classifications, ct);
-        result.Recommendations = classifications.Count;
+            await suggest.ExecuteAsync(classifications, ct);
+            result.Recommendations = classifications.Count;
+        }
+
+        if (fileError is not null)
+            throw new InvalidOperationException(
+                $"Scan of job '{job.Name}' completed other files but file(s) failed. First error: {fileError.Message}",
+                fileError);
 
         return result;
     }
