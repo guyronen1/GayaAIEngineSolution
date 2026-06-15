@@ -47,8 +47,12 @@ public class FileContentScanStrategyTests
     private sealed class Harness
     {
         public readonly List<JobFailure> Saved = new();
+        public readonly List<JobFailure> Classified = new();
         public readonly InMemoryWatermarkRepo Watermarks = new();
         public readonly FileContentScanStrategy Strategy;
+        /// <summary>SourceId for which SaveAsync returns a faulted task (simulates an
+        /// unexpected non-oversize per-file error).</summary>
+        public string? ThrowForSourceId { get; init; }
 
         public Harness()
         {
@@ -57,6 +61,9 @@ public class FileContentScanStrategyTests
             jobRepo.Setup(r => r.SaveAsync(It.IsAny<JobFailure>(), It.IsAny<CancellationToken>()))
                    .Returns((JobFailure f, CancellationToken _) =>
                    {
+                       if (ThrowForSourceId is not null &&
+                           string.Equals(f.SourceId, ThrowForSourceId, StringComparison.OrdinalIgnoreCase))
+                           return Task.FromException<JobFailure>(new IOException("simulated unreadable file"));
                        f.FailureId = next++;
                        Saved.Add(f);
                        return Task.FromResult(f);
@@ -64,7 +71,11 @@ public class FileContentScanStrategyTests
 
             var classify = new Mock<IClassifyJobsUseCase>();
             classify.Setup(c => c.ExecuteAsync(It.IsAny<IEnumerable<JobFailure>>(), It.IsAny<CancellationToken>()))
-                    .ReturnsAsync((IReadOnlyList<ClassificationResult>)Array.Empty<ClassificationResult>());
+                    .Returns((IEnumerable<JobFailure> fs, CancellationToken _) =>
+                    {
+                        Classified.AddRange(fs);
+                        return Task.FromResult((IReadOnlyList<ClassificationResult>)Array.Empty<ClassificationResult>());
+                    });
 
             var suggest = new Mock<IGenerateSuggestionsUseCase>();
             suggest.Setup(s => s.ExecuteAsync(It.IsAny<IEnumerable<ClassificationResult>>(), It.IsAny<CancellationToken>()))
@@ -331,6 +342,30 @@ public class FileContentScanStrategyTests
         Assert.Equal(2, result.FailuresDetected);
         var ids = h.Saved.Select(f => f.SourceId).OrderBy(x => x).ToList();
         Assert.Equal(new[] { "INV-2026-001", "ORD-88134" }, ids);
+    }
+
+    // ── Per-file resilience ──────────────────────────────────────────────────────
+
+    [Fact] // one file's processing throws (non-oversize) — the other file must still fire
+           // AND classify, and the scan surfaces the error afterward (recorded Failed).
+    public async Task OneFileThrows_OtherFileStillFiresAndClassifies_ScanSurfacesError()
+    {
+        using var dir = new TempDir();
+        dir.Write("WARNING_ok.xml", WarningOrder);
+        dir.Write("WARNING_throw.xml", WarningOrder);
+
+        // Filename-only rule → SourceId = filename without extension. Faulted SaveAsync
+        // on "WARNING_throw" simulates an unexpected per-file error (not oversize).
+        var h = new Harness { ThrowForSourceId = "WARNING_throw" };
+        var rule = FcRule(1, "*WARNING*.xml", desc: "Found WARNING file");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => h.Strategy.ScanAsync(TheJob, Source(dir.Path, false, rule)));
+
+        // The good file's failure was still created (not orphaned) and classified.
+        var f = Assert.Single(h.Saved);
+        Assert.Equal("WARNING_ok", f.SourceId);
+        Assert.Contains(h.Classified, c => c.SourceId == "WARNING_ok");
     }
 
     // ── Scenario dump for human review (asserts + writes a readable table) ────────

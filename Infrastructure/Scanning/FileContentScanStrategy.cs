@@ -75,11 +75,18 @@ public sealed class FileContentScanStrategy(
         var allFiles = Directory.EnumerateFiles(source.LogFolder, "*", searchOption).ToList();
 
         var created = new List<JobFailure>();
+        // One bad file (a non-oversize extractor/SaveAsync/watermark throw) must not
+        // abort the whole source scan and orphan earlier files' failures (classify runs
+        // after the loop). Catch per file, surface the first error after classify.
+        // Oversize is a separate, expected per-rule skip (inner catch) — not an error.
+        Exception? fileError = null;
 
         foreach (var file in allFiles)
         {
             ct.ThrowIfCancellationRequested();
 
+          try
+          {
             var fileName = Path.GetFileName(file);
 
             // Which rules' filename pattern matches this file? (file-outer/rule-inner)
@@ -209,16 +216,36 @@ public sealed class FileContentScanStrategy(
             // including oversize/no-match, so an unchanged file isn't reprocessed
             // (and an oversize file isn't re-counted) every tick.
             await watermarks.UpsertContentWatermarkAsync(job.MonitoredJobId, file, mtime, ct);
+          }
+          catch (Exception ex) when (ex is not OperationCanceledException)
+          {
+              // Unexpected per-file error (extractor failure other than oversize,
+              // SaveAsync, watermark write) — skip this file, keep scanning the rest,
+              // surface the first error after classify so the scan-run is recorded Failed.
+              logger.LogError(ex,
+                  "FileContentScan '{Job}': file {File} failed — skipping it, other files continue",
+                  job.Name, file);
+              fileError ??= ex;
+          }
         }
 
         result.FailuresDetected = created.Count;
-        if (created.Count == 0) return result;
 
-        var classifications = await classify.ExecuteAsync(created, ct);
-        result.Classifications = classifications.Count;
+        // Classify + suggest whatever was created BEFORE surfacing any file error, so a
+        // late-failing file never leaves earlier files' failures unclassified.
+        if (created.Count > 0)
+        {
+            var classifications = await classify.ExecuteAsync(created, ct);
+            result.Classifications = classifications.Count;
 
-        await suggest.ExecuteAsync(classifications, ct);
-        result.Recommendations = classifications.Count;
+            await suggest.ExecuteAsync(classifications, ct);
+            result.Recommendations = classifications.Count;
+        }
+
+        if (fileError is not null)
+            throw new InvalidOperationException(
+                $"Scan of job '{job.Name}' completed other files but file(s) failed. First error: {fileError.Message}",
+                fileError);
 
         return result;
     }
