@@ -19,13 +19,15 @@ public sealed record RecommendationDto(
     int?     JobTypeId,
     int?     FixPolicyRuleId,
     bool?    PolicyIsAutoHealEligible,
-    int      PolicyStepCount)
+    int      PolicyStepCount,
+    string?  PolicyActionType)
 {
     public static RecommendationDto From(
         AiRecommendation r,
         int?             fixPolicyRuleId          = null,
         bool?            policyIsAutoHealEligible = null,
-        int              policyStepCount          = 0) => new(
+        int              policyStepCount          = 0,
+        string?          policyActionType         = null) => new(
         r.RecommendationId,
         r.FailureId,
         r.SuggestedAction,
@@ -41,8 +43,10 @@ public sealed record RecommendationDto(
         r.Failure?.JobTypeId,
         fixPolicyRuleId,
         policyIsAutoHealEligible,
-        policyStepCount);
+        policyStepCount,
+        policyActionType);
 
     public static RecommendationDto From(RecommendationListItem item) =>
-        From(item.Recommendation, item.FixPolicyRuleId, item.PolicyIsAutoHealEligible, item.PolicyStepCount);
+        From(item.Recommendation, item.FixPolicyRuleId, item.PolicyIsAutoHealEligible,
+             item.PolicyStepCount, item.PolicyActionType);
 }

@@ -146,7 +146,7 @@ public sealed class SqlRecommendationRepository(IDbContextFactory<AiDbContext> f
                              && p.ErrorTypeId    == r.ErrorTypeId
                              && p.MonitoredJobId == r.Failure!.MonitoredJobId)
                     .OrderByDescending(p => p.ActionTimestamp)
-                    .Select(p => new { p.RuleId, p.IsAutoHealEligible, StepCount = p.Steps.Count })
+                    .Select(p => new { p.RuleId, p.IsAutoHealEligible, StepCount = p.Steps.Count, p.ActionType })
                     .FirstOrDefault(),
                 Default  = db.FixPolicyRules
                     .Where(p => p.Enabled
@@ -154,7 +154,7 @@ public sealed class SqlRecommendationRepository(IDbContextFactory<AiDbContext> f
                              && p.JobTypeId      == r.Failure!.JobTypeId
                              && p.MonitoredJobId == null)
                     .OrderByDescending(p => p.ActionTimestamp)
-                    .Select(p => new { p.RuleId, p.IsAutoHealEligible, StepCount = p.Steps.Count })
+                    .Select(p => new { p.RuleId, p.IsAutoHealEligible, StepCount = p.Steps.Count, p.ActionType })
                     .FirstOrDefault(),
             })
             .ToListAsync(ct);
@@ -170,7 +170,8 @@ public sealed class SqlRecommendationRepository(IDbContextFactory<AiDbContext> f
                     x.Rec,
                     policy?.RuleId,
                     policy?.IsAutoHealEligible,
-                    policy?.StepCount ?? 0);
+                    policy?.StepCount ?? 0,
+                    policy?.ActionType.ToString());
             })
             .ToList();
 

@@ -140,9 +140,12 @@ public class DataController(
                 r.RecommendedAt,
                 // Wire the live policy info — drives the rec card's composite
                 // badge + step-list lazy fetch on the drawer.
+                // PolicyActionType is what the drawer reads for Approve vs
+                // Acknowledge: ActionType=Manual → no automation → Acknowledge.
                 FixPolicyRuleId          = policyInfo.GetValueOrDefault(r.ErrorTypeId).RuleId,
                 PolicyIsAutoHealEligible = policyInfo.GetValueOrDefault(r.ErrorTypeId).AutoHeal,
                 PolicyStepCount          = policyInfo.GetValueOrDefault(r.ErrorTypeId).StepCount,
+                PolicyActionType         = policyInfo.GetValueOrDefault(r.ErrorTypeId).ActionType,
             }).ToList(),
             Executions       = executions,
         });
@@ -155,7 +158,7 @@ public class DataController(
     /// (ruleId, autoHeal, stepCount) per ErrorTypeId; missing entries mean
     /// no enabled policy matches.
     /// </summary>
-    private async Task<Dictionary<int, (int? RuleId, bool? AutoHeal, int StepCount)>>
+    private async Task<Dictionary<int, (int? RuleId, bool? AutoHeal, int StepCount, string? ActionType)>>
         BuildPolicyInfoAsync(MaiaAI.Core.Entities.JobFailure failure, CancellationToken ct)
     {
         var errorTypeIds = failure.Recommendations
@@ -163,12 +166,15 @@ public class DataController(
             .Distinct()
             .ToList();
         if (errorTypeIds.Count == 0)
-            return new Dictionary<int, (int?, bool?, int)>();
+            return new Dictionary<int, (int?, bool?, int, string?)>();
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var monitoredJobId = failure.MonitoredJobId;
         var jobTypeId      = failure.JobTypeId;
 
+        // Project ActionType without .ToString() inside the EF expression tree
+        // (enum.ToString() can fail provider translation — shape to string
+        // post-materialization, same pattern as TriggerType in GetFailureStatus).
         var candidates = await db.FixPolicyRules
             .Where(p => p.Enabled && errorTypeIds.Contains(p.ErrorTypeId)
                      && ((monitoredJobId != null && p.MonitoredJobId == monitoredJobId)
@@ -177,14 +183,15 @@ public class DataController(
                 p.RuleId, p.ErrorTypeId, p.MonitoredJobId,
                 p.IsAutoHealEligible,
                 p.ActionTimestamp,
-                StepCount = p.Steps.Count,
+                StepCount  = p.Steps.Count,
+                p.ActionType,
             })
             .ToListAsync(ct);
 
         // For each ErrorTypeId pick the winning row: override (MonitoredJobId
         // non-null) beats default (null), then newest ActionTimestamp as
         // defensive tiebreaker. Mirrors SqlFixPolicyRepository.GetForAsync.
-        var result = new Dictionary<int, (int? RuleId, bool? AutoHeal, int StepCount)>();
+        var result = new Dictionary<int, (int? RuleId, bool? AutoHeal, int StepCount, string? ActionType)>();
         foreach (var etid in errorTypeIds)
         {
             var winner = candidates
@@ -193,8 +200,8 @@ public class DataController(
                 .ThenByDescending(p => p.ActionTimestamp)
                 .FirstOrDefault();
             result[etid] = winner is null
-                ? (null, null, 0)
-                : (winner.RuleId, winner.IsAutoHealEligible, winner.StepCount);
+                ? (null, null, 0, null)
+                : (winner.RuleId, winner.IsAutoHealEligible, winner.StepCount, winner.ActionType.ToString());
         }
         return result;
     }

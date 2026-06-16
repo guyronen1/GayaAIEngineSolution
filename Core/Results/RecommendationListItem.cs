@@ -18,7 +18,11 @@ public sealed record RecommendationListItem(
     AiRecommendation Recommendation,
     int?             FixPolicyRuleId,
     bool?            PolicyIsAutoHealEligible,
-    int              PolicyStepCount);
+    int              PolicyStepCount,
+    // ActionType from the winning FixPolicyRule — the field the drawer reads
+    // to decide "Approve" vs "Acknowledge" (not FixCategory, which is intent,
+    // not mechanism). Null when no enabled policy matches.
+    string?          PolicyActionType);
 
 // PolicyStepCount is 0 for non-composite policies AND when no policy matches.
 // Non-zero → UI renders a "Composite (N steps)" badge on the rec card and
