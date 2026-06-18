@@ -37,6 +37,14 @@ public interface IMonitoredJobLeaseRepository
     /// </summary>
     Task<bool> HeartbeatAsync(
         int monitoredJobId, string leasedBy, int extendSeconds, CancellationToken ct);
+
+    /// <summary>
+    /// Returns the subset of <paramref name="jobIds"/> that currently hold an active lease
+    /// (LeasedUntil &gt; now). Used by manual scan triggers to skip jobs already being scanned
+    /// by the background worker or another manual request, preventing duplicate failures.
+    /// </summary>
+    Task<IReadOnlySet<int>> GetActivelyLeasedJobIdsAsync(
+        IEnumerable<int> jobIds, CancellationToken ct);
 }
 
 /// <summary>Result of a claim: the job to scan plus how long the lease is good for.</summary>

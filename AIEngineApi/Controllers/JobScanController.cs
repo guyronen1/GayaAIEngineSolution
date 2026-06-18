@@ -20,6 +20,7 @@ namespace AIEngineAPI.Controllers;
 [Route("api/[controller]")]
 public class JobScanController(
     IMonitoredJobRepository      jobRepo,
+    IMonitoredJobLeaseRepository leaseRepo,
     IEnumerable<IScanStrategy>   strategies,
     IClassifyJobsUseCase         classify,
     IGenerateSuggestionsUseCase  suggest,
@@ -39,6 +40,10 @@ public class JobScanController(
         if (job is null)
             return NotFound(new { Message = $"MonitoredJob {monitoredJobId} not found." });
 
+        var leased = await leaseRepo.GetActivelyLeasedJobIdsAsync([monitoredJobId], ct);
+        if (leased.Contains(monitoredJobId))
+            return Conflict(new { Message = $"Job '{job.Name}' is already being scanned — try again once it finishes." });
+
         return await RunScanAsync(job, ct);
     }
 
@@ -51,18 +56,33 @@ public class JobScanController(
         if (job is null)
             return NotFound(new { Message = $"MonitoredJob '{name}' not found." });
 
+        var leased = await leaseRepo.GetActivelyLeasedJobIdsAsync([job.MonitoredJobId], ct);
+        if (leased.Contains(job.MonitoredJobId))
+            return Conflict(new { Message = $"Job '{job.Name}' is already being scanned — try again once it finishes." });
+
         return await RunScanAsync(job, ct);
     }
 
-    /// <summary>Run the scan pipeline for ALL active MonitoredJobs immediately.</summary>
+    /// <summary>
+    /// Run the scan pipeline for ALL active MonitoredJobs immediately.
+    /// Jobs that are currently being scanned by the background worker (or another
+    /// concurrent manual request) are skipped — Skipped=true in the response.
+    /// </summary>
     [HttpPost("scan-all")]
     public async Task<IActionResult> ScanAll(CancellationToken ct)
     {
         var jobs    = await jobRepo.GetActiveAsync(ct);
+        var leased  = await leaseRepo.GetActivelyLeasedJobIdsAsync(jobs.Select(j => j.MonitoredJobId), ct);
         var results = new List<object>();
 
         foreach (var job in jobs)
         {
+            if (leased.Contains(job.MonitoredJobId))
+            {
+                results.Add(new { job.MonitoredJobId, job.Name, Skipped = true, Reason = "Already scanning" });
+                continue;
+            }
+
             try
             {
                 var r = await RunJobSourcesAsync(job, ct);

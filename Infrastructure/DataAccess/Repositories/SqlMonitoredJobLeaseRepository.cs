@@ -115,4 +115,23 @@ public sealed class SqlMonitoredJobLeaseRepository(IDbContextFactory<AiDbContext
 
         return rows > 0;
     }
+
+    public async Task<IReadOnlySet<int>> GetActivelyLeasedJobIdsAsync(
+        IEnumerable<int> jobIds, CancellationToken ct)
+    {
+        var ids = jobIds.ToList();
+        if (ids.Count == 0) return new HashSet<int>();
+
+        await using var db = await factory.CreateDbContextAsync(ct);
+        var now = DateTime.Now;
+
+        var leased = await db.MonitoredJobLeases
+            .Where(l => ids.Contains(l.MonitoredJobId)
+                     && l.LeasedUntil != null
+                     && l.LeasedUntil > now)
+            .Select(l => l.MonitoredJobId)
+            .ToListAsync(ct);
+
+        return new HashSet<int>(leased);
+    }
 }
