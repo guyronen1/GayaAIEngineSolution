@@ -10,7 +10,9 @@ namespace AIEngineAPI.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/admin")]
-public class AdminController(IScanHistoryRetentionService retention) : ControllerBase
+public class AdminController(
+    IScanHistoryRetentionService retention,
+    IWorkerControlService        workerControl) : ControllerBase
 {
     /// <summary>
     /// Runs the ScanRunHistory retention sweep immediately. Same code path
@@ -28,5 +30,24 @@ public class AdminController(IScanHistoryRetentionService retention) : Controlle
             Cutoff  = result.Cutoff,
             Skipped = result.Skipped,
         });
+    }
+
+    /// <summary>
+    /// Pauses the MonitoringWorker scan loop. In-flight scans complete
+    /// normally; no new claims are made until resumed.
+    /// </summary>
+    [HttpPost("worker/pause")]
+    public IActionResult PauseWorker()
+    {
+        workerControl.Pause();
+        return Ok(new { isPaused = true });
+    }
+
+    /// <summary>Resumes the MonitoringWorker scan loop.</summary>
+    [HttpPost("worker/resume")]
+    public IActionResult ResumeWorker()
+    {
+        workerControl.Resume();
+        return Ok(new { isPaused = false });
     }
 }

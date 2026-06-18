@@ -100,6 +100,9 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IScanStrategy, FileContentScanStrategy>();
         services.AddHttpClient();
 
+        // ── Worker control (pause/resume — singleton shared by worker + controller) ─
+        services.AddSingleton<IWorkerControlService, WorkerControlService>();
+
         // ── Background workers ───────────────────────────────────────────────
         services.AddHostedService<MonitoringWorker>();
         services.AddHostedService<ScanHistoryRetentionWorker>();

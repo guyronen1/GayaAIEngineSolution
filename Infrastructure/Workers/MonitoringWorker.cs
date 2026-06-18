@@ -16,6 +16,7 @@ namespace MaiaAI.Infrastructure.Workers;
 /// </summary>
 public sealed class MonitoringWorker(
     IServiceScopeFactory      scopeFactory,
+    IWorkerControlService     control,
     ILogger<MonitoringWorker> logger) : BackgroundService
 {
     private static readonly TimeSpan IdleDelay = TimeSpan.FromSeconds(5);
@@ -35,6 +36,12 @@ public sealed class MonitoringWorker(
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            if (control.IsPaused)
+            {
+                await Task.Delay(IdleDelay, stoppingToken);
+                continue;
+            }
+
             try
             {
                 IReadOnlyList<ClaimedJobLease> claimed;

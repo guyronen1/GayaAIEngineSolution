@@ -19,6 +19,7 @@ public class DataController(
     IRecommendationRepository      recommendations,
     IMonitoredJobRepository        monitoredJobs,
     IScanRunHistoryRepository      scanRuns,
+    IWorkerControlService          workerControl,
     IDbContextFactory<AiDbContext> dbFactory) : ControllerBase
 {
     private const int MaxPageSize = 200;
@@ -387,6 +388,7 @@ public class DataController(
         return Ok(new
         {
             workerAlive,
+            isPaused           = workerControl.IsPaused,
             lastActivityAt,
             aliveWindowSeconds,
             activeScans,
