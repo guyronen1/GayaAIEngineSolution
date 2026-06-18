@@ -1,5 +1,4 @@
-﻿using MaiaAI.Core.Entities;
-using MaiaAI.Core.Enums;
+using MaiaAI.Core.Entities;
 
 namespace AIEngineAPI.Contracts;
 
@@ -8,26 +7,12 @@ public sealed record MonitoredJobDto(
     string                           Name,
     string?                          DisplayName,
     string                           JobTypeName,
-    int                              ScanTypeId,
-    string                           ScanTypeName,
-    // FileSystem
-    string?                          LogFolder,
-    string?                          SearchPatterns,
-    string?                          InputFolder,
-    bool                             IncludeSubfolders,
-    // Database
-    string?                          ConnectionName,
-    // ApiEndpoint
-    string?                          LogSourceUrl,
     int                              PollingIntervalSeconds,
     bool                             IsActive,
     string?                          Description,
     DateTime                         CreatedAt,
     IReadOnlyList<ScanCheckRuleDto>  ScanCheckRules,
     IReadOnlyList<RuleOverrideDto>   Rules,
-    // Tier 2.5: typed observation points within the job, each with its own config
-    // + rules. Active sources only (soft-deleted ones are hidden). The legacy
-    // top-level ScanCheckRules stays until the cleanup round removes it.
     IReadOnlyList<ScanSourceDto>     Sources,
     MonitoredJobLeaseDto?            Lease)
 {
@@ -36,14 +21,6 @@ public sealed record MonitoredJobDto(
         m.Name,
         m.DisplayName,
         m.JobType?.Name        ?? m.JobTypeId.ToString(),
-        m.ScanTypeId,
-        m.ScanType.ToString(),
-        m.LogFolder,
-        m.SearchPatterns,
-        m.InputFolder,
-        m.IncludeSubfolders,
-        m.ConnectionName,
-        m.LogSourceUrl,
         m.PollingIntervalSeconds,
         m.IsActive,
         m.Description,
@@ -61,8 +38,6 @@ public sealed record MonitoredJobDto(
             .OrderBy(s => s.ScanSourceId)
             .Select(ScanSourceDto.From)
             .ToList(),
-        // Null-safe: schema is 1:1 with cascade delete so Lease should always be
-        // present, but treat absence as gray-state in the UI rather than NPE.
         MonitoredJobLeaseDto.From(m.Lease));
 }
 

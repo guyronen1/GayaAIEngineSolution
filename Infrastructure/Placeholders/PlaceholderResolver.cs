@@ -51,6 +51,7 @@ public sealed class PlaceholderResolver(IDbContextFactory<AiDbContext> factory)
         await using var db = await factory.CreateDbContextAsync(ct);
         return await db.JobFailures
             .Include(j => j.MonitoredJob)
+            .Include(j => j.ScanSource)
             .AsNoTracking()
             .FirstOrDefaultAsync(j => j.FailureId == failureId, ct);
     }
@@ -80,8 +81,8 @@ public sealed class PlaceholderResolver(IDbContextFactory<AiDbContext> factory)
                 // CopyFile dest reuse the original name: {inputFolder}\{sourceFileName}.
                 "sourcefilename" => failure?.SourceFilePath is { Length: > 0 } sfp
                     ? Path.GetFileName(sfp) : string.Empty,
-                "jobfolder"      => failure?.MonitoredJob?.LogFolder ?? string.Empty,
-                "inputfolder"    => failure?.MonitoredJob?.InputFolder ?? string.Empty,
+                "jobfolder"      => failure?.ScanSource?.LogFolder   ?? string.Empty,
+                "inputfolder"    => failure?.ScanSource?.InputFolder ?? string.Empty,
                 _                => m.Value   // unknown → left literal
             };
 

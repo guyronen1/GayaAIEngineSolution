@@ -1,5 +1,4 @@
-﻿using System.Text.RegularExpressions;
-using MaiaAI.Core.Entities;
+﻿using MaiaAI.Core.Entities;
 using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Interfaces.UseCases;
@@ -50,7 +49,7 @@ public sealed class DirectoryPipelineUseCase(
         };
 
         var activeJobs = (await monitoredJobs.GetActiveAsync(ct))
-            .Where(j => j.LogFolder is not null)
+            .Where(j => j.ScanSources.Any(s => s.IsActive && s.ScanType == ScanType.FileSystem))
             .ToList();
 
         var created = new List<JobFailure>();
@@ -60,8 +59,8 @@ public sealed class DirectoryPipelineUseCase(
             ct.ThrowIfCancellationRequested();
             try
             {
-                var match          = ResolveMonitoredJob(filePath, activeJobs);
-                var monitoredJobId = match?.MonitoredJobId;
+                var (match, matchedSource) = ResolveMonitoredJob(filePath, activeJobs);
+                var monitoredJobId         = match?.MonitoredJobId;
 
                 // Only read content appended since the last scan
                 var (content, newOffset) = await ReadNewContentAsync(filePath, monitoredJobId, ct);
@@ -77,8 +76,8 @@ public sealed class DirectoryPipelineUseCase(
                     .ToList();
 
                 // Always advance watermark even if no errors in this chunk
-                if (monitoredJobId.HasValue)
-                    await watermarks.UpdateFileOffsetAsync(monitoredJobId.Value, filePath, newOffset, ct);
+                if (monitoredJobId.HasValue && matchedSource is not null)
+                    await watermarks.UpdateFileOffsetAsync(monitoredJobId.Value, matchedSource.ScanSourceId, filePath, newOffset, ct);
 
                 if (!errorLines.Any()) continue;
 
@@ -161,7 +160,7 @@ public sealed class DirectoryPipelineUseCase(
         return (content, newOffset);
     }
 
-    private static MonitoredJob? ResolveMonitoredJob(
+    private static (MonitoredJob? Job, ScanSource? Source) ResolveMonitoredJob(
         string filePath,
         List<MonitoredJob> activeJobs)
     {
@@ -170,26 +169,21 @@ public sealed class DirectoryPipelineUseCase(
 
         foreach (var job in activeJobs)
         {
-            if (!fileDir.Equals(job.LogFolder, StringComparison.OrdinalIgnoreCase))
-                continue;
+            var fsSource = job.ScanSources
+                .FirstOrDefault(s => s.IsActive
+                    && s.ScanType == ScanType.FileSystem
+                    && fileDir.Equals(s.LogFolder, StringComparison.OrdinalIgnoreCase));
 
-            if (job.SearchPatterns is null)
-                return job;
+            if (fsSource is null) continue;
 
-            var patterns = job.SearchPatterns
+            if (fsSource.SearchPatterns is null) return (job, fsSource);
+
+            var patterns = fsSource.SearchPatterns
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-            if (patterns.Any(p => GlobMatch(fileName, p)))
-                return job;
+            if (patterns.Any(p => FilenamePattern.Matches(fileName, p)))
+                return (job, fsSource);
         }
-        return null;
-    }
-
-    private static bool GlobMatch(string input, string pattern)
-    {
-        var regex = "^" + Regex.Escape(pattern)
-                               .Replace("\\*", ".*")
-                               .Replace("\\?", ".") + "$";
-        return Regex.IsMatch(input, regex, RegexOptions.IgnoreCase);
+        return (null, null);
     }
 }

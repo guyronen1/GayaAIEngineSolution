@@ -394,19 +394,11 @@ public class ConfigController(
     {
         if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
-        // Tier 2.5 Option 1: a MonitoredJob is PURE IDENTITY. Scan config (ScanType,
-        // folder, pattern, connection, url) lives on its ScanSources, added on the
-        // config screen — NOT here. The job-level scan columns are vestigial (kept until
-        // the cleanup migration drops them). ScanTypeId is set to a fixed placeholder
-        // because the column is non-nullable with a FK; it is never read for scanning or
-        // lease duration anymore (the worker reads ScanSources; the lease takes MAX over
-        // active sources). The scan fields on the request are ignored.
         var job = new MonitoredJob
         {
             Name                   = req.Name,
             DisplayName            = req.DisplayName,
             JobTypeId              = req.JobTypeId,
-            ScanTypeId             = 1,   // vestigial placeholder (FK-satisfying); sources own scan type
             PollingIntervalSeconds = req.PollingIntervalSeconds,
             IsActive               = req.IsActive,
             Description            = req.Description,
@@ -983,6 +975,19 @@ public class ConfigController(
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var job = await db.MonitoredJobs.FindAsync([jobId], ct);
         if (job is null) return NotFound();
+
+        // Same duplicate guard as CreateClassificationRule — UX_ClassificationRules_ActiveKey
+        // is on (JobTypeId, Pattern) WHERE IsActive=1, so an existing global rule for this
+        // job's JobType will conflict. Return 409 with the conflicting rule id so the UI
+        // can offer "Link the existing rule" instead of silently crashing.
+        var dupId = await FindActiveClassificationDuplicateAsync(db, job.JobTypeId, req.Pattern, null, ct);
+        if (dupId is not null)
+            return Conflict(new
+            {
+                error             = "DuplicateClassificationRule",
+                message           = $"An enabled classification rule with this pattern already exists for this job type (rule {dupId}). Link the existing rule instead of creating a duplicate.",
+                conflictingRuleId = dupId,
+            });
 
         var rule = new ClassificationRule
         {

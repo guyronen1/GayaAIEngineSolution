@@ -12,9 +12,7 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
         await using var db = await factory.CreateDbContextAsync(ct);
         return await db.MonitoredJobs
             .Include(m => m.JobType)
-            .Include(m => m.ScanTypeDefinition)
             .Include(m => m.ScanCheckRules.Where(r => r.IsActive))
-            // Tier 2.5: eager-load active sources (+ type + rules) for per-source scanning.
             .Include(m => m.ScanSources.Where(s => s.IsActive))
                 .ThenInclude(s => s.ScanTypeDefinition)
             .Include(m => m.ScanSources.Where(s => s.IsActive))
@@ -29,7 +27,6 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
         await using var db = await factory.CreateDbContextAsync(ct);
         return await db.MonitoredJobs
             .Include(m => m.JobType)
-            .Include(m => m.ScanTypeDefinition)
             .Include(m => m.Lease)
             .Include(m => m.ScanCheckRules.Where(r => r.IsActive))
             .Include(m => m.JobRules.Where(jr => jr.IsActive))
@@ -44,14 +41,8 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
         await using var db = await factory.CreateDbContextAsync(ct);
         return await db.MonitoredJobs
             .Include(m => m.JobType)
-            .Include(m => m.ScanTypeDefinition)
             .Include(m => m.ScanCheckRules.Where(r => r.IsActive))
             .Include(m => m.JobRules).ThenInclude(jr => jr.Rule).ThenInclude(r => r!.ErrorType)
-            // Tier 2.5 phase (a→b): eager-load active sources with their scan type
-            // and active rules so the worker can run per-source (phase b). Additive —
-            // existing callers ignore m.ScanSources. Identical filter on both repeated
-            // Includes (EF requires that). Split query avoids a cartesian blow-up from
-            // including a third collection alongside ScanCheckRules + JobRules.
             .Include(m => m.ScanSources.Where(s => s.IsActive))
                 .ThenInclude(s => s.ScanTypeDefinition)
             .Include(m => m.ScanSources.Where(s => s.IsActive))
@@ -65,7 +56,6 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
         await using var db = await factory.CreateDbContextAsync(ct);
         return await db.MonitoredJobs
             .Include(m => m.JobType)
-            .Include(m => m.ScanTypeDefinition)
             .Include(m => m.ScanCheckRules.Where(r => r.IsActive))
             .Include(m => m.ScanSources.Where(s => s.IsActive))
                 .ThenInclude(s => s.ScanTypeDefinition)
@@ -120,13 +110,10 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
         await using var db = await factory.CreateDbContextAsync(ct);
         return await db.MonitoredJobs
             .Include(m => m.JobType)
-            .Include(m => m.ScanTypeDefinition)
             .Include(m => m.Lease)
             .Include(m => m.ScanCheckRules)
             .Include(m => m.JobRules.Where(jr => jr.IsActive))
                 .ThenInclude(jr => jr.Rule).ThenInclude(r => r!.ErrorType)
-            // Tier 2.5: active sources (+ type + active rules) for the config screen's
-            // Scan Sources section. Active-filtered so soft-deleted sources/rules don't show.
             .Include(m => m.ScanSources.Where(s => s.IsActive))
                 .ThenInclude(s => s.ScanTypeDefinition)
             .Include(m => m.ScanSources.Where(s => s.IsActive))
@@ -157,13 +144,6 @@ public sealed class SqlMonitoredJobRepository(IDbContextFactory<AiDbContext> fac
                 .SetProperty(m => m.Name,                   job.Name)
                 .SetProperty(m => m.DisplayName,            job.DisplayName)
                 .SetProperty(m => m.JobTypeId,              job.JobTypeId)
-                .SetProperty(m => m.ScanTypeId,             job.ScanTypeId)
-                .SetProperty(m => m.LogFolder,              job.LogFolder)
-                .SetProperty(m => m.SearchPatterns,         job.SearchPatterns)
-                .SetProperty(m => m.InputFolder,            job.InputFolder)
-                .SetProperty(m => m.IncludeSubfolders,      job.IncludeSubfolders)
-                .SetProperty(m => m.ConnectionName,         job.ConnectionName)
-                .SetProperty(m => m.LogSourceUrl,           job.LogSourceUrl)
                 .SetProperty(m => m.PollingIntervalSeconds, job.PollingIntervalSeconds)
                 .SetProperty(m => m.IsActive,               job.IsActive)
                 .SetProperty(m => m.Description,            job.Description),

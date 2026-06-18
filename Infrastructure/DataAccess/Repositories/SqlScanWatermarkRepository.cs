@@ -17,7 +17,7 @@ public sealed class SqlScanWatermarkRepository(IDbContextFactory<AiDbContext> fa
         return wm?.ByteOffset ?? 0;
     }
 
-    public async Task UpdateFileOffsetAsync(int monitoredJobId, string filePath, long byteOffset, CancellationToken ct = default)
+    public async Task UpdateFileOffsetAsync(int monitoredJobId, int scanSourceId, string filePath, long byteOffset, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
         var wm = await db.ScanFileWatermarks
@@ -27,6 +27,7 @@ public sealed class SqlScanWatermarkRepository(IDbContextFactory<AiDbContext> fa
             db.ScanFileWatermarks.Add(new ScanFileWatermark
             {
                 MonitoredJobId = monitoredJobId,
+                ScanSourceId   = scanSourceId,
                 FilePath       = filePath,
                 ByteOffset     = byteOffset,
                 LastScannedAt  = DateTime.Now,
@@ -50,7 +51,7 @@ public sealed class SqlScanWatermarkRepository(IDbContextFactory<AiDbContext> fa
         return wm?.LastModifiedAt;
     }
 
-    public async Task UpsertContentWatermarkAsync(int monitoredJobId, string filePath, DateTime lastModifiedAt, CancellationToken ct = default)
+    public async Task UpsertContentWatermarkAsync(int monitoredJobId, int scanSourceId, string filePath, DateTime lastModifiedAt, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
         var wm = await db.ScanContentWatermarks
@@ -60,6 +61,7 @@ public sealed class SqlScanWatermarkRepository(IDbContextFactory<AiDbContext> fa
             db.ScanContentWatermarks.Add(new ScanContentWatermark
             {
                 MonitoredJobId = monitoredJobId,
+                ScanSourceId   = scanSourceId,
                 FilePath       = filePath,
                 LastModifiedAt = lastModifiedAt,
                 LastScannedAt  = DateTime.Now,

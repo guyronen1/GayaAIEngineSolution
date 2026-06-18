@@ -10,10 +10,7 @@ public class ScanRunHistory
 {
     public int      ScanRunId        { get; set; }
     public int      MonitoredJobId   { get; set; }
-    /// <summary>Tier 2.5: the ScanSource this run scanned. Nullable during phase
-    /// (a) (existing rows backfilled to the job's singleton source); becomes the
-    /// natural grain once the worker runs per-source.</summary>
-    public int?     ScanSourceId     { get; set; }
+    public int     ScanSourceId     { get; set; }
     /// <summary>Worker identity that owned the lease for this run ("host=...;pid=...;runId=...").</summary>
     public required string LeasedBy  { get; set; }
     public DateTime StartedAt        { get; set; }

@@ -14,7 +14,7 @@ namespace MaiaAI.Infrastructure.Fix;
 ///
 /// Connection resolution order:
 ///   1. ActionPayload prefix "ConnectionName|SQL" — explicit override
-///   2. The failure's MonitoredJob.ConnectionName (set by Database scan jobs)
+///   2. The failure's ScanSource.ConnectionName (set by Database scan sources)
 ///   3. "DefaultConnection" (AIEngineDb itself)
 ///
 /// Placeholder substitution is delegated to IPlaceholderResolver — see
@@ -44,12 +44,10 @@ public sealed class SqlScriptExecutor(
 
         var (connectionName, sqlTemplate) = SplitPayload(payload);
 
-        // Connection string still needs the failure's MonitoredJob.ConnectionName
-        // as a fallback — that lookup stays here. Placeholder substitution moves
-        // to IPlaceholderResolver.
+        // Connection string fallback reads from the failure's ScanSource.ConnectionName.
         await using var db = await factory.CreateDbContextAsync(ct);
         var failure = await db.JobFailures
-            .Include(j => j.MonitoredJob)
+            .Include(j => j.ScanSource)
             .AsNoTracking()
             .FirstOrDefaultAsync(j => j.FailureId == recommendation.FailureId, ct);
 
@@ -59,7 +57,7 @@ public sealed class SqlScriptExecutor(
             return false;
         }
 
-        connectionName ??= failure.MonitoredJob?.ConnectionName ?? "DefaultConnection";
+        connectionName ??= failure.ScanSource?.ConnectionName ?? "DefaultConnection";
         var connStr = config.GetConnectionString(connectionName);
         if (string.IsNullOrWhiteSpace(connStr))
         {

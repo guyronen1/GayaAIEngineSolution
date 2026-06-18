@@ -257,9 +257,11 @@ public class DataController(
             {
                 l.MonitoredJobId,
                 JobName                = l.MonitoredJob!.Name,
-                ScanTypeName           = l.MonitoredJob.ScanTypeDefinition != null
-                                            ? l.MonitoredJob.ScanTypeDefinition.Name
-                                            : "Unknown",
+                ScanTypeName           = db.ScanSources
+                                            .Where(s => s.MonitoredJobId == l.MonitoredJobId && s.IsActive)
+                                            .OrderBy(s => s.ScanSourceId)
+                                            .Select(s => s.ScanTypeDefinition != null ? s.ScanTypeDefinition.Name : "Unknown")
+                                            .FirstOrDefault() ?? "Unknown",
                 PollingIntervalSeconds = l.MonitoredJob.PollingIntervalSeconds,
                 l.LeasedBy,
                 l.LeasedAt,

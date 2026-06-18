@@ -215,7 +215,7 @@ public sealed class FileContentScanStrategy(
             // One watermark write per examined (new/changed) file, after all rules —
             // including oversize/no-match, so an unchanged file isn't reprocessed
             // (and an oversize file isn't re-counted) every tick.
-            await watermarks.UpsertContentWatermarkAsync(job.MonitoredJobId, file, mtime, ct);
+            await watermarks.UpsertContentWatermarkAsync(job.MonitoredJobId, source.ScanSourceId, file, mtime, ct);
           }
           catch (Exception ex) when (ex is not OperationCanceledException)
           {

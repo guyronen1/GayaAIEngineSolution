@@ -30,7 +30,7 @@ public class FileContentScanStrategyTests
         public Task<DateTime?> GetContentWatermarkAsync(int jobId, string path, CancellationToken ct = default)
             => Task.FromResult(_content.TryGetValue((jobId, path), out var v) ? v : (DateTime?)null);
 
-        public Task UpsertContentWatermarkAsync(int jobId, string path, DateTime mtime, CancellationToken ct = default)
+        public Task UpsertContentWatermarkAsync(int jobId, int scanSourceId, string path, DateTime mtime, CancellationToken ct = default)
         {
             _content[(jobId, path)] = mtime;
             UpsertCount++;
@@ -39,7 +39,7 @@ public class FileContentScanStrategyTests
 
         // Unused by FileContent scans.
         public Task<long> GetFileOffsetAsync(int j, string p, CancellationToken ct = default) => throw new NotImplementedException();
-        public Task UpdateFileOffsetAsync(int j, string p, long o, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task UpdateFileOffsetAsync(int j, int s, string p, long o, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<string?> GetDbWatermarkAsync(int r, CancellationToken ct = default) => throw new NotImplementedException();
         public Task UpdateDbWatermarkAsync(int r, string v, CancellationToken ct = default) => throw new NotImplementedException();
     }

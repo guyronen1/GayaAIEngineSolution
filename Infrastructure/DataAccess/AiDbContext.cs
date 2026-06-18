@@ -511,13 +511,6 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.HasIndex(m => m.Name).IsUnique();
             e.Property(m => m.Name).IsRequired().HasMaxLength(200);
             e.Property(m => m.DisplayName).HasMaxLength(300);
-            e.Property(m => m.ScanTypeId).IsRequired().HasDefaultValue(1);
-            e.Property(m => m.LogFolder).HasMaxLength(500);
-            e.Property(m => m.SearchPatterns).HasMaxLength(500);
-            e.Property(m => m.IncludeSubfolders).IsRequired().HasDefaultValue(false);
-            e.Property(m => m.InputFolder).HasMaxLength(500);
-            e.Property(m => m.ConnectionName).HasMaxLength(200);
-            e.Property(m => m.LogSourceUrl).HasMaxLength(500);
             e.Property(m => m.PollingIntervalSeconds).HasDefaultValue(300);
             e.Property(m => m.IsActive).HasDefaultValue(true);
             e.Property(m => m.Description).HasColumnType("nvarchar(1000)");
@@ -526,11 +519,6 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
             e.HasOne(m => m.JobType)
                 .WithMany(jt => jt.MonitoredJobs)
                 .HasForeignKey(m => m.JobTypeId)
-                .OnDelete(DeleteBehavior.Restrict);
-
-            e.HasOne(m => m.ScanTypeDefinition)
-                .WithMany(s => s.MonitoredJobs)
-                .HasForeignKey(m => m.ScanTypeId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
     }
@@ -684,9 +672,6 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
                 Name                   = "TrapInterfaces",
                 DisplayName            = "Trap Interfaces",
                 JobTypeId              = 1,
-                ScanTypeId             = 1,              // FileSystem
-                LogFolder              = @"c:\logs",
-                SearchPatterns         = "Trap*.log",
                 Description            = "עיבוד ניודים נכנסים",
                 PollingIntervalSeconds = 300,
                 IsActive               = true,

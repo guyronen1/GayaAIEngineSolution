@@ -241,7 +241,7 @@ public sealed class MonitoringWorker(
     /// history-write failure never breaks the source loop. result == null means the
     /// source failed before producing counts (no strategy / threw).</summary>
     private async Task WriteSourceHistoryAsync(
-        IScanRunHistoryRepository historyRepo, int monitoredJobId, int? scanSourceId,
+        IScanRunHistoryRepository historyRepo, int monitoredJobId, int scanSourceId,
         DateTime startedAt, JobRunOutcome outcome, string? error, ScanResult? result, CancellationToken ct)
     {
         try

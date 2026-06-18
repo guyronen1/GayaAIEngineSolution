@@ -25,6 +25,7 @@ public class PlaceholderResolverTests : IAsyncLifetime
     private const int FailureId      = 9001;
     private const int MonitoredJobId = 9100;
     private const int JobTypeId      = 9200;
+    private const int ScanSourceId   = 9300;
 
     public async Task InitializeAsync()
     {
@@ -41,6 +42,13 @@ public class PlaceholderResolverTests : IAsyncLifetime
             MonitoredJobId = MonitoredJobId,
             Name           = "TestJob",
             JobTypeId      = JobTypeId,
+        });
+        _db.ScanSources.Add(new ScanSource
+        {
+            ScanSourceId   = ScanSourceId,
+            MonitoredJobId = MonitoredJobId,
+            ScanTypeId     = 1,
+            Name           = "TestSource",
             LogFolder      = @"C:\logs\test",
             InputFolder    = @"C:\input\test",
         });
@@ -49,6 +57,7 @@ public class PlaceholderResolverTests : IAsyncLifetime
             FailureId      = FailureId,
             JobTypeId      = JobTypeId,
             MonitoredJobId = MonitoredJobId,
+            ScanSourceId   = ScanSourceId,
             SourceId       = "deposit-abc-123",
             SourceLogPath  = @"C:\logs\test\app.log",
             SourceFilePath = @"C:\input\test\deposit_20260601.txt",
@@ -113,6 +122,7 @@ public class PlaceholderResolverTests : IAsyncLifetime
             FailureId      = FailureId + 1,
             JobTypeId      = JobTypeId,
             MonitoredJobId = MonitoredJobId,
+            ScanSourceId   = ScanSourceId,
             SourceId       = "x",
             SourceLogPath  = @"C:\logs\test\app.log",
             SourceFilePath = null,                          // ← the case under test
@@ -145,6 +155,7 @@ public class PlaceholderResolverTests : IAsyncLifetime
             FailureId      = FailureId + 2,
             JobTypeId      = JobTypeId,
             MonitoredJobId = MonitoredJobId,
+            ScanSourceId   = ScanSourceId,
             SourceId       = "y",
             SourceLogPath  = @"C:\logs\test\app.log",
             SourceFilePath = null,
@@ -196,6 +207,7 @@ public class PlaceholderResolverTests : IAsyncLifetime
             FailureId      = FailureId + 3,
             JobTypeId      = JobTypeId,
             MonitoredJobId = MonitoredJobId,
+            ScanSourceId   = ScanSourceId,
             SourceId       = "z",
             SourceLogPath  = @"C:\logs\test\app.log",
             SourceFilePath = null,

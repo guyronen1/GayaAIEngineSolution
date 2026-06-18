@@ -134,7 +134,7 @@ public sealed class FileSystemScanStrategy(
                 if (string.IsNullOrWhiteSpace(content))
                 {
                     if (newOffset > 0)
-                        await watermarks.UpdateFileOffsetAsync(job.MonitoredJobId, file, newOffset, ct);
+                        await watermarks.UpdateFileOffsetAsync(job.MonitoredJobId, source.ScanSourceId, file, newOffset, ct);
                     continue;
                 }
 
@@ -216,7 +216,7 @@ public sealed class FileSystemScanStrategy(
                     }
                 }
 
-                await watermarks.UpdateFileOffsetAsync(job.MonitoredJobId, file, newOffset, ct);
+                await watermarks.UpdateFileOffsetAsync(job.MonitoredJobId, source.ScanSourceId, file, newOffset, ct);
               }
               catch (Exception ex) when (ex is not OperationCanceledException)
               {

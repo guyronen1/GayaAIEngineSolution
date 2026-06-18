@@ -68,14 +68,14 @@ public class JobScanController(
                 var r = await RunJobSourcesAsync(job, ct);
                 results.Add(new
                 {
-                    job.MonitoredJobId, job.Name, job.ScanType, Skipped = false,
+                    job.MonitoredJobId, job.Name, Skipped = false,
                     r.FailuresDetected, r.Classifications, r.Recommendations,
                     r.Detail
                 });
             }
             catch (Exception ex)
             {
-                results.Add(new { job.MonitoredJobId, job.Name, job.ScanType, Skipped = false, Error = ex.Message });
+                results.Add(new { job.MonitoredJobId, job.Name, Skipped = false, Error = ex.Message });
             }
         }
 
@@ -123,12 +123,8 @@ public class JobScanController(
     /// </summary>
     private async Task<ScanResult> RunJobSourcesAsync(MonitoredJob job, CancellationToken ct)
     {
-        // Tier 2.5 Option 1: the job has no authoritative scan type — derive the
-        // aggregate's representative type from its first active source (the per-source
-        // Detail below lists them all). Falls back to the vestigial job.ScanType only if
-        // there are no active sources (scan-all can reach here with zero).
         var firstSource = job.ScanSources.FirstOrDefault(s => s.IsActive);
-        var agg = new ScanResult { JobName = job.Name, ScanType = firstSource?.ScanType ?? job.ScanType, Detail = string.Empty };
+        var agg = new ScanResult { JobName = job.Name, ScanType = firstSource?.ScanType ?? ScanType.FileSystem, Detail = string.Empty };
         var details = new List<string>();
 
         foreach (var source in job.ScanSources.Where(s => s.IsActive))
@@ -183,7 +179,7 @@ public class JobScanController(
     /// operator's scan response.
     /// </summary>
     private async Task RecordSourceHistoryAsync(
-        MonitoredJob job, int? scanSourceId, JobRunOutcome outcome, string? error,
+        MonitoredJob job, int scanSourceId, JobRunOutcome outcome, string? error,
         ScanResult? result, DateTime startedAt, CancellationToken ct)
     {
         var leasedBy    = $"{ManualLeasedByPrefix};runId={Guid.NewGuid():N}";

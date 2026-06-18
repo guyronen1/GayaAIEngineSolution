@@ -47,9 +47,13 @@ public sealed class SqlClassificationRuleRepository(IDbContextFactory<AiDbContex
     public async Task DeleteAsync(int ruleId, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
-        var rule = await db.ClassificationRules.FindAsync([ruleId], ct);
+        var rule = await db.ClassificationRules
+            .Include(r => r.MonitoredJobRules)
+            .FirstOrDefaultAsync(r => r.RuleId == ruleId, ct);
         if (rule is null) return;
-        rule.IsActive = false;
+        // MonitoredJobRules FK is Restrict, so remove links before the rule.
+        db.MonitoredJobRules.RemoveRange(rule.MonitoredJobRules);
+        db.ClassificationRules.Remove(rule);
         await db.SaveChangesAsync(ct);
     }
 }

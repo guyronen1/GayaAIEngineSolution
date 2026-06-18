@@ -60,7 +60,7 @@ public sealed class FileSystemScanStrategyTests : IDisposable
             var watermarks = new Mock<IScanWatermarkRepository>();
             watermarks.Setup(w => w.GetFileOffsetAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
                       .ReturnsAsync(0L);
-            watermarks.Setup(w => w.UpdateFileOffsetAsync(It.IsAny<int>(), It.IsAny<string>(), It.IsAny<long>(), It.IsAny<CancellationToken>()))
+            watermarks.Setup(w => w.UpdateFileOffsetAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<long>(), It.IsAny<CancellationToken>()))
                       .Returns(Task.CompletedTask);
 
             var classify = new Mock<IClassifyJobsUseCase>();

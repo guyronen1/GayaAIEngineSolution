@@ -13,8 +13,8 @@ namespace MaiaAI.Core.Interfaces;
 ///   {sourceLogPath}  — JobFailure.SourceLogPath (where the error was DETECTED)
 ///   {sourceFilePath} — JobFailure.SourceFilePath (the INPUT file being worked on; nullable)
 ///   {sourceFileName} — filename-only slice of {sourceFilePath} (Path.GetFileName; empty if no path)
-///   {jobFolder}      — MonitoredJob.LogFolder (FS scan jobs)
-///   {inputFolder}    — MonitoredJob.InputFolder (FS scan jobs; rare)
+///   {jobFolder}      — ScanSource.LogFolder (FS / FileContent scan sources)
+///   {inputFolder}    — ScanSource.InputFolder (FS scan sources; rare)
 ///
 /// Unknown placeholders are left literal so downstream tooling can spot them.
 /// </summary>
