@@ -220,42 +220,61 @@ public sealed class AuthorizationMatrixTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task MustChangePassword_is_a_soft_prompt_not_a_block()
+    public async Task MustChangePassword_blocks_every_api_call_until_rotation_and_skip_is_rejected_outside_dev()
     {
+        // Factory runs in "Testing" (non-Development) → secure/prod-like behavior.
         var client = await LoggedIn(AuthTestFactory.MustChangeUser);
 
-        // NOT blocked — the change is optional now (the hard-blocking middleware was
-        // removed). A must-change user can use the app normally.
-        var access = (await client.GetAsync("/api/data/worker-status")).StatusCode;
-        Assert.True(access != HttpStatusCode.Forbidden && access != HttpStatusCode.Unauthorized,
-            $"must-change user should not be blocked, got {(int)access}");
+        // BLOCKED on a normal /api route with the distinct reason — forced rotation.
+        var blocked = await client.GetAsync("/api/data/worker-status");
+        Assert.Equal(HttpStatusCode.Forbidden, blocked.StatusCode);
+        Assert.Contains("PasswordChangeRequired", await blocked.Content.ReadAsStringAsync());
 
-        // The flag is still surfaced so the SPA can show the one-time prompt.
+        // /me stays reachable (allow-listed) and reports the flag + that skip is NOT allowed here.
         var meBody = await (await client.GetAsync("/api/auth/me")).Content.ReadAsStringAsync();
         Assert.Contains("\"mustChangePassword\":true", meBody);
+        Assert.Contains("\"canSkipPasswordChange\":false", meBody);
 
-        // "Skip" clears the flag without changing the password…
+        // Skip is fail-closed outside Development → 403 SkipNotAllowed, flag NOT cleared.
         var dismiss = await client.PostAsync("/api/auth/dismiss-password-change", null);
-        Assert.Equal(HttpStatusCode.NoContent, dismiss.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, dismiss.StatusCode);
+        Assert.Contains("SkipNotAllowed", await dismiss.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/data/worker-status")).StatusCode);
 
-        // …so the prompt no longer recurs.
-        var meAfter = await (await client.GetAsync("/api/auth/me")).Content.ReadAsStringAsync();
-        Assert.Contains("\"mustChangePassword\":false", meAfter);
+        // The ONLY way past in a real deployment: actually change the password.
+        var change = await client.PostAsJsonAsync("/api/auth/change-password",
+            new { currentPassword = AuthTestFactory.Password, newPassword = "Rotated!9876" });
+        Assert.Equal(HttpStatusCode.NoContent, change.StatusCode);
+
+        // Same session (live flag re-lookup) now unblocked.
+        var after = (await client.GetAsync("/api/data/worker-status")).StatusCode;
+        Assert.True(after != HttpStatusCode.Forbidden && after != HttpStatusCode.Unauthorized,
+            $"expected pass after rotation, got {(int)after}");
 
         client.Dispose();
     }
 
     [Fact]
-    public async Task Changing_password_also_clears_the_prompt()
+    public async Task Skip_is_allowed_only_in_Development()
     {
-        var client = await LoggedIn(AuthTestFactory.MustChangeUser);
+        // Same flow as above but in the Development environment → the dev convenience.
+        await using var devFactory = new AuthTestFactory("Development");
+        await devFactory.SeedUsersAsync();
+        var client = devFactory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+        var login = await client.PostAsJsonAsync("/api/auth/login",
+            new { username = AuthTestFactory.MustChangeUser, password = AuthTestFactory.Password });
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
 
-        var change = await client.PostAsJsonAsync("/api/auth/change-password",
-            new { currentPassword = AuthTestFactory.Password, newPassword = "Rotated!9876" });
-        Assert.Equal(HttpStatusCode.NoContent, change.StatusCode);
+        // Blocked first…
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/data/worker-status")).StatusCode);
 
-        var meAfter = await (await client.GetAsync("/api/auth/me")).Content.ReadAsStringAsync();
-        Assert.Contains("\"mustChangePassword\":false", meAfter);
+        // …but in Development the skip is permitted and clears the flag.
+        var dismiss = await client.PostAsync("/api/auth/dismiss-password-change", null);
+        Assert.Equal(HttpStatusCode.NoContent, dismiss.StatusCode);
+
+        var after = (await client.GetAsync("/api/data/worker-status")).StatusCode;
+        Assert.True(after != HttpStatusCode.Forbidden && after != HttpStatusCode.Unauthorized,
+            $"expected pass after dev skip, got {(int)after}");
 
         client.Dispose();
     }

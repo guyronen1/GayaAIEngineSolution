@@ -1,5 +1,6 @@
 ﻿using AIEngineAPI.Auth;
 using AIEngineAPI.Extensions;
+using AIEngineAPI.Middleware;
 using MaiaAI.Core.Configuration;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Infrastructure.Extensions;
@@ -105,6 +106,8 @@ app.UseExceptionHandler();
 app.UseCors("AllowLocalhost");
 app.UseHttpsRedirection();
 app.UseAuthentication();
+// Forces a password rotation before any other /api/* call (after auth, before authz).
+app.UseMiddleware<MustChangePasswordMiddleware>();
 app.UseAuthorization();
 app.MapControllers();
 

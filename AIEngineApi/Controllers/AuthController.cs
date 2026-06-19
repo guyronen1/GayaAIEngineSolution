@@ -9,20 +9,26 @@ namespace AIEngineAPI.Controllers;
 /// <summary>
 /// Authentication endpoints. Login/logout manage the httpOnly session cookie;
 /// change-password is self-service; /me lets the SPA discover the current identity.
-///
-/// Phase 1 note: there is no global enforcement yet, so these all respond as written
-/// regardless of authentication state. <c>[AllowAnonymous]</c> on login/me is for when
-/// the Phase-3 fallback policy lands (they must stay reachable without a session).
+/// <c>[AllowAnonymous]</c> on login/me keeps them reachable under the default-closed
+/// fallback policy; logout + change-password + dismiss require a session.
+/// A seeded/reset user must rotate before using the app (MustChangePasswordMiddleware);
+/// the only skip is the Development-only dismiss endpoint (fails closed elsewhere).
 /// </summary>
 [ApiController]
 [Route("api/auth")]
 public class AuthController(
     IAuthService          auth,
     ICurrentUserAccessor  currentUser,
-    AuthOptions           options) : ControllerBase
+    AuthOptions           options,
+    IWebHostEnvironment   env) : ControllerBase
 {
     public sealed record LoginRequest(string Username, string Password);
     public sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword);
+
+    // Skipping a forced password change is a DEVELOPMENT-ONLY convenience. Fails closed:
+    // any non-Development environment (incl. unset → Production) cannot skip, so the
+    // forced rotation is the shipped default. This is the single env-gated point.
+    private bool SkipAllowed => env.IsDevelopment();
 
     [AllowAnonymous]
     [HttpPost("login")]
@@ -41,9 +47,10 @@ public class AuthController(
 
         return Ok(new
         {
-            username           = result.User!.Username,
-            role               = result.User.Role?.Name,
-            mustChangePassword = result.MustChangePassword,
+            username             = result.User!.Username,
+            role                 = result.User.Role?.Name,
+            mustChangePassword   = result.MustChangePassword,
+            canSkipPasswordChange = SkipAllowed,
         });
     }
 
@@ -73,14 +80,21 @@ public class AuthController(
         return NoContent();
     }
 
-    /// <summary>Skip the one-time change-password prompt without changing it. Clears
-    /// the user's MustChangePassword flag so the prompt doesn't recur. The change is
-    /// optional — this is the "Skip for now" action.</summary>
+    /// <summary>DEVELOPMENT-ONLY "Skip for now": clears the MustChangePassword flag
+    /// without changing the password. Fails closed — in any non-Development environment
+    /// this returns 403, so the forced rotation cannot be skipped in a real deployment.
+    /// </summary>
     [HttpPost("dismiss-password-change")]
     public async Task<IActionResult> DismissPasswordChange(CancellationToken ct)
     {
         if (!currentUser.IsAuthenticated || currentUser.UserId is not { } userId)
             return Unauthorized();
+        if (!SkipAllowed)
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                error   = "SkipNotAllowed",
+                message = "Password change is mandatory in this environment.",
+            });
         await auth.DismissPasswordChangeAsync(userId, ct);
         return NoContent();
     }
@@ -97,10 +111,11 @@ public class AuthController(
 
         return Ok(new
         {
-            authenticated      = true,
-            username           = currentUser.UserName,
-            role               = currentUser.Role?.ToString(),
-            mustChangePassword = currentUser.MustChangePassword,
+            authenticated         = true,
+            username              = currentUser.UserName,
+            role                  = currentUser.Role?.ToString(),
+            mustChangePassword    = currentUser.MustChangePassword,
+            canSkipPasswordChange = SkipAllowed,
         });
     }
 }

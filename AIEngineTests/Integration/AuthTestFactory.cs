@@ -28,10 +28,16 @@ public sealed class AuthTestFactory : WebApplicationFactory<Program>
     public const string MustChangeUser = "mustchange";
 
     private readonly string _dbName = "authmatrix-" + Guid.NewGuid().ToString("N");
+    private readonly string _environment;
+
+    /// <param name="environment">ASP.NET environment name. Defaults to "Testing"
+    /// (treated as non-Development → forced rotation, skip disabled). Pass
+    /// "Development" to exercise the dev-only skip path.</param>
+    public AuthTestFactory(string environment = "Testing") => _environment = environment;
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
-        builder.UseEnvironment("Testing");
+        builder.UseEnvironment(_environment);
 
         // Guarantee a connection string exists so AddMaiaAI doesn't throw, regardless
         // of whether appsettings.json is discovered from the test content root. The
