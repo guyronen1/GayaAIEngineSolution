@@ -3,6 +3,7 @@ using MaiaAI.Core.Entities;
 using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Infrastructure.DataAccess;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -15,13 +16,16 @@ namespace AIEngineAPI.Controllers;
 /// log at Error level but never fail the request — the operator's config
 /// change already succeeded by then; degraded audit beats a rolled-back UX.
 ///
-/// OperatorId is required on every write and rides in the request body
-/// (POST/PUT) or query string (DELETE). Frontend passes "operator" as a
-/// constant for now; when auth lands, it'll switch to the authenticated
-/// identity in one sweep.
+/// The audit actor is the authenticated principal (currentUser.UserName), resolved
+/// server-side — no client-supplied operatorId. Authorization (RequireOperator for
+/// reads, RequireAdmin for writes) guarantees a known user reaches any action.
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
+// Class floor = Operator (config READS expose SQL payloads / connection names /
+// SqlQuery text). Every write action additionally carries [Authorize(RequireAdmin)];
+// ASP.NET AND-combines them, so writes require Admin while reads stay Operator.
+[Authorize(Policy = "RequireOperator")]
 public class ConfigController(
     IMonitoredJobRepository           jobRepo,
     IClassificationRuleRepository     ruleRepo,
@@ -29,8 +33,14 @@ public class ConfigController(
     ILogger<ConfigController>         logger,
     IDbContextFactory<AiDbContext>    dbFactory,
     IEnumerable<IFileContentExtractor> extractors,
-    ISqlFixScopeValidator             sqlFixScope) : ControllerBase
+    ISqlFixScopeValidator             sqlFixScope,
+    ICurrentUserAccessor              currentUser) : ControllerBase
 {
+    // Audit actor = the authenticated principal. Guaranteed present: every action is
+    // gated by RequireOperator/RequireAdmin, so no anonymous request reaches a body.
+    // The client-supplied operatorId is gone from the contract (server-authoritative).
+    private string Actor => currentUser.UserName!;
+
     // FileContent extractors keyed by format — used to validate a rule's
     // locator syntax at save time (each extractor owns its locator grammar).
     private readonly Dictionary<FileFormat, IFileContentExtractor> _extractors =
@@ -91,19 +101,6 @@ public class ConfigController(
         bool b   => b ? "true" : "false",
         _        => v.ToString() ?? "null",
     };
-
-    /// <summary>Reject the request when OperatorId wasn't supplied — every
-    /// write needs an actor for the audit row to be useful.</summary>
-    private bool MissingOperator(string? operatorId, out IActionResult error)
-    {
-        if (string.IsNullOrWhiteSpace(operatorId))
-        {
-            error = BadRequest(new { Message = "operatorId is required." });
-            return true;
-        }
-        error = null!;
-        return false;
-    }
 
     /// <summary>
     /// Validates the composite/step shape of a FixPolicyRule upsert request.
@@ -258,10 +255,10 @@ public class ConfigController(
         }));
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPost("error-types")]
     public async Task<IActionResult> CreateErrorType([FromBody] UpsertErrorTypeRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
         if (string.IsNullOrWhiteSpace(req.Code))        return BadRequest(new { Message = "Code is required." });
         if (string.IsNullOrWhiteSpace(req.DisplayName)) return BadRequest(new { Message = "DisplayName is required." });
         if (!Enum.TryParse<Severity>(req.Severity, ignoreCase: true, out var severity))
@@ -286,17 +283,17 @@ public class ConfigController(
             entityType: "ErrorType",
             entityId:   et.ErrorTypeId.ToString(),
             eventType:  "ErrorTypeCreated",
-            actor:      req.OperatorId,
+            actor:      Actor,
             detail:     $"Created ErrorType '{et.Code}' (DisplayName='{et.DisplayName}', Severity={et.Severity}, IsActive={FormatValue(et.IsActive)})",
             ct: ct);
 
         return Ok(new { et.ErrorTypeId });
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPut("error-types/{id:int}")]
     public async Task<IActionResult> UpdateErrorType(int id, [FromBody] UpsertErrorTypeRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
         if (!Enum.TryParse<Severity>(req.Severity, ignoreCase: true, out var severity))
             return BadRequest(new { Message = $"Unknown Severity '{req.Severity}'. Expected: Low, Medium, High, Critical." });
 
@@ -335,18 +332,18 @@ public class ConfigController(
             entityType: "ErrorType",
             entityId:   id.ToString(),
             eventType:  "ErrorTypeUpdated",
-            actor:      req.OperatorId,
+            actor:      Actor,
             detail:     diff.Length > 0 ? diff : "No changes",
             ct: ct);
 
         return NoContent();
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpDelete("error-types/{id:int}")]
     public async Task<IActionResult> DeleteErrorType(
-        int id, [FromQuery] string operatorId, CancellationToken ct)
+        int id, CancellationToken ct)
     {
-        if (MissingOperator(operatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var et = await db.ErrorTypes.FindAsync([id], ct);
@@ -361,7 +358,7 @@ public class ConfigController(
             entityType: "ErrorType",
             entityId:   id.ToString(),
             eventType:  "ErrorTypeDeleted",
-            actor:      operatorId,
+            actor:      Actor,
             detail:     $"Soft-deleted ErrorType {id} ('{et.Code}', DisplayName='{et.DisplayName}')",
             ct: ct);
 
@@ -389,10 +386,10 @@ public class ConfigController(
         return Ok(MonitoredJobDto.From(job));
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPost("monitored-jobs")]
     public async Task<IActionResult> CreateJob([FromBody] UpsertMonitoredJobRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         var job = new MonitoredJob
         {
@@ -410,17 +407,17 @@ public class ConfigController(
             entityType: "MonitoredJob",
             entityId:   saved.MonitoredJobId.ToString(),
             eventType:  "MonitoredJobCreated",
-            actor:      req.OperatorId,
+            actor:      Actor,
             detail:     $"Created MonitoredJob '{saved.Name}' (JobTypeId={saved.JobTypeId}, PollingIntervalSeconds={saved.PollingIntervalSeconds}, IsActive={FormatValue(saved.IsActive)})",
             ct: ct);
 
         return Ok(new { saved.MonitoredJobId });
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPut("monitored-jobs/{id:int}")]
     public async Task<IActionResult> UpdateJob(int id, [FromBody] UpsertMonitoredJobRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         var job = await jobRepo.GetByIdAsync(id, ct);
         if (job is null) return NotFound();
@@ -456,18 +453,18 @@ public class ConfigController(
             entityType: "MonitoredJob",
             entityId:   id.ToString(),
             eventType:  "MonitoredJobUpdated",
-            actor:      req.OperatorId,
+            actor:      Actor,
             detail:     diff.Length > 0 ? diff : "No changes",
             ct: ct);
 
         return NoContent();
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpDelete("monitored-jobs/{id:int}")]
     public async Task<IActionResult> DeleteJob(
-        int id, [FromQuery] string operatorId, CancellationToken ct)
+        int id, CancellationToken ct)
     {
-        if (MissingOperator(operatorId, out var opErr)) return opErr;
 
         // Snapshot name for the audit row before the entity is gone.
         var job = await jobRepo.GetByIdAsync(id, ct);
@@ -480,7 +477,7 @@ public class ConfigController(
             entityType: "MonitoredJob",
             entityId:   id.ToString(),
             eventType:  "MonitoredJobDeleted",
-            actor:      operatorId,
+            actor:      Actor,
             detail:     $"Deleted MonitoredJob {id} ('{jobName}')",
             ct: ct);
 
@@ -593,10 +590,10 @@ public class ConfigController(
         return null;
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPost("monitored-jobs/{jobId:int}/scan-rules")]
     public async Task<IActionResult> CreateScanRule(int jobId, [FromBody] UpsertScanCheckRuleRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         var checkType = Enum.Parse<CheckType>(req.CheckType);
 
@@ -645,17 +642,17 @@ public class ConfigController(
             entityType: "ScanCheckRule",
             entityId:   rule.CheckRuleId.ToString(),
             eventType:  "ScanRuleCreated",
-            actor:      req.OperatorId,
+            actor:      Actor,
             detail:     $"Created ScanCheckRule for MonitoredJob {jobId} (CheckType={rule.CheckType}, TargetField='{rule.TargetField}', Severity={rule.Severity})",
             ct: ct);
 
         return Ok(new { rule.CheckRuleId });
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPut("scan-rules/{id:int}")]
     public async Task<IActionResult> UpdateScanRule(int id, [FromBody] UpsertScanCheckRuleRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = await db.ScanCheckRules.FindAsync([id], ct);
@@ -722,18 +719,18 @@ public class ConfigController(
             entityType: "ScanCheckRule",
             entityId:   id.ToString(),
             eventType:  "ScanRuleUpdated",
-            actor:      req.OperatorId,
+            actor:      Actor,
             detail:     diff.Length > 0 ? diff : "No changes",
             ct: ct);
 
         return NoContent();
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpDelete("scan-rules/{id:int}")]
     public async Task<IActionResult> DeleteScanRule(
-        int id, [FromQuery] string operatorId, CancellationToken ct)
+        int id, CancellationToken ct)
     {
-        if (MissingOperator(operatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = await db.ScanCheckRules.FindAsync([id], ct);
@@ -748,7 +745,7 @@ public class ConfigController(
             entityType: "ScanCheckRule",
             entityId:   id.ToString(),
             eventType:  "ScanRuleDeleted",
-            actor:      operatorId,
+            actor:      Actor,
             detail:     $"Soft-deleted ScanCheckRule {id} (MonitoredJob {ruleJobId}, {ruleCheckType} on '{ruleTargetField}')",
             ct: ct);
 
@@ -816,10 +813,10 @@ public class ConfigController(
         return null;
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPost("monitored-jobs/{jobId:int}/scan-sources")]
     public async Task<IActionResult> CreateScanSource(int jobId, [FromBody] UpsertScanSourceRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         if (await db.MonitoredJobs.FindAsync([jobId], ct) is null) return NotFound();
@@ -841,15 +838,15 @@ public class ConfigController(
         db.ScanSources.Add(source);
         await db.SaveChangesAsync(ct);
 
-        await WriteAuditAsync("ScanSource", source.ScanSourceId.ToString(), "ScanSourceCreated", req.OperatorId,
+        await WriteAuditAsync("ScanSource", source.ScanSourceId.ToString(), "ScanSourceCreated", Actor,
             $"Created ScanSource '{source.Name}' for MonitoredJob {jobId} (ScanTypeId={source.ScanTypeId})", ct);
         return Ok(new { source.ScanSourceId });
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPut("scan-sources/{id:int}")]
     public async Task<IActionResult> UpdateScanSource(int id, [FromBody] UpsertScanSourceRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var source = await db.ScanSources.FindAsync([id], ct);
@@ -889,15 +886,15 @@ public class ConfigController(
             ("ConnectionName",    beforeConn,     source.ConnectionName),
             ("LogSourceUrl",      beforeUrl,      source.LogSourceUrl),
             ("IsActive",          beforeActive,   source.IsActive));
-        await WriteAuditAsync("ScanSource", id.ToString(), "ScanSourceUpdated", req.OperatorId,
+        await WriteAuditAsync("ScanSource", id.ToString(), "ScanSourceUpdated", Actor,
             diff.Length > 0 ? diff : "No changes", ct);
         return NoContent();
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpDelete("scan-sources/{id:int}")]
-    public async Task<IActionResult> DeleteScanSource(int id, [FromQuery] string operatorId, CancellationToken ct)
+    public async Task<IActionResult> DeleteScanSource(int id, CancellationToken ct)
     {
-        if (MissingOperator(operatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var source = await db.ScanSources
@@ -916,7 +913,7 @@ public class ConfigController(
         foreach (var r in source.ScanCheckRules.Where(r => r.IsActive)) { r.IsActive = false; deactivated++; }
         await db.SaveChangesAsync(ct);
 
-        await WriteAuditAsync("ScanSource", id.ToString(), "ScanSourceDeleted", operatorId,
+        await WriteAuditAsync("ScanSource", id.ToString(), "ScanSourceDeleted", Actor,
             $"Soft-deleted ScanSource {id} ('{name}', ScanTypeId={typeId}); deactivated {deactivated} rule(s)", ct);
         return NoContent();
     }
@@ -925,10 +922,10 @@ public class ConfigController(
     /// the source; MonitoredJobId is derived from the source's job (kept populated for
     /// the migration era). This is the canonical add-rule path now that the worker
     /// scans per source.</summary>
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPost("scan-sources/{sourceId:int}/scan-rules")]
     public async Task<IActionResult> CreateScanRuleForSource(int sourceId, [FromBody] UpsertScanCheckRuleRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var source = await db.ScanSources.FindAsync([sourceId], ct);
@@ -959,18 +956,18 @@ public class ConfigController(
         db.ScanCheckRules.Add(rule);
         await db.SaveChangesAsync(ct);
 
-        await WriteAuditAsync("ScanCheckRule", rule.CheckRuleId.ToString(), "ScanRuleCreated", req.OperatorId,
+        await WriteAuditAsync("ScanCheckRule", rule.CheckRuleId.ToString(), "ScanRuleCreated", Actor,
             $"Created ScanCheckRule for ScanSource {sourceId} (CheckType={rule.CheckType}, TargetField='{rule.TargetField}', Severity={rule.Severity})", ct);
         return Ok(new { rule.CheckRuleId });
     }
 
     // ── Per-job Classification Rules ────────────────────────────────────────
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPost("monitored-jobs/{jobId:int}/classification-rules")]
     public async Task<IActionResult> CreateJobClassificationRule(
         int jobId, [FromBody] UpsertJobClassificationRuleRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var job = await db.MonitoredJobs.FindAsync([jobId], ct);
@@ -997,7 +994,7 @@ public class ConfigController(
             Confidence  = req.Confidence,
             Priority    = req.Priority,
             IsActive    = req.IsActive,
-            CreatedBy   = req.OperatorId,
+            CreatedBy   = Actor,
         };
         db.ClassificationRules.Add(rule);
         await db.SaveChangesAsync(ct);
@@ -1014,19 +1011,18 @@ public class ConfigController(
             entityType: "ClassificationRule",
             entityId:   rule.RuleId.ToString(),
             eventType:  "ClassificationRuleCreated",
-            actor:      req.OperatorId,
+            actor:      Actor,
             detail:     $"Created ClassificationRule for MonitoredJob {jobId} (ErrorTypeId={req.ErrorTypeId}, Pattern='{rule.Pattern}', Confidence={rule.Confidence}, Priority={rule.Priority}) and linked it",
             ct: ct);
 
         return Ok(new { rule.RuleId });
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPost("monitored-jobs/{jobId:int}/classification-rules/{ruleId:int}/link")]
     public async Task<IActionResult> LinkJobClassificationRule(
-        int jobId, int ruleId,
-        [FromQuery] string operatorId, CancellationToken ct)
+        int jobId, int ruleId, CancellationToken ct)
     {
-        if (MissingOperator(operatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         if (await db.MonitoredJobs.FindAsync([jobId], ct) is null) return NotFound("Job not found");
@@ -1044,19 +1040,18 @@ public class ConfigController(
             entityType: "MonitoredJob",
             entityId:   jobId.ToString(),
             eventType:  "ClassificationRuleLinked",
-            actor:      operatorId,
+            actor:      Actor,
             detail:     $"Linked ClassificationRule {ruleId} to MonitoredJob {jobId}",
             ct: ct);
 
         return Ok(new { ruleId });
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpDelete("monitored-jobs/{jobId:int}/classification-rules/{ruleId:int}")]
     public async Task<IActionResult> DeleteJobClassificationRule(
-        int jobId, int ruleId,
-        [FromQuery] string operatorId, CancellationToken ct)
+        int jobId, int ruleId, CancellationToken ct)
     {
-        if (MissingOperator(operatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var link = await db.MonitoredJobRules
@@ -1069,7 +1064,7 @@ public class ConfigController(
             entityType: "MonitoredJob",
             entityId:   jobId.ToString(),
             eventType:  "ClassificationRuleUnlinked",
-            actor:      operatorId,
+            actor:      Actor,
             detail:     $"Unlinked ClassificationRule {ruleId} from MonitoredJob {jobId}",
             ct: ct);
 
@@ -1154,10 +1149,10 @@ public class ConfigController(
         });
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPost("fix-policy-rules")]
     public async Task<IActionResult> CreateFixPolicyRule([FromBody] UpsertFixPolicyRuleRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         if (!Enum.TryParse<FixCategory>(req.FixCategory, out var fixCategory))
@@ -1214,7 +1209,7 @@ public class ConfigController(
             ActionPayload      = actionType == FixActionType.Composite ? null : req.ActionPayload,
             IsAutoHealEligible = req.IsAutoHealEligible,
             Enabled            = req.Enabled,
-            CreatedBy          = req.OperatorId,
+            CreatedBy          = Actor,
             ActionTimestamp    = DateTime.Now,
             // Provenance when created from an /unconfigured Case-B gap (else null).
             SuggestedBy         = req.SuggestedBy,
@@ -1248,17 +1243,17 @@ public class ConfigController(
             entityType: "FixPolicyRule",
             entityId:   rule.RuleId.ToString(),
             eventType:  "FixPolicyCreated",
-            actor:      req.OperatorId,
+            actor:      Actor,
             detail:     $"Created FixPolicyRule (JobTypeId={rule.JobTypeId}, ErrorTypeId={rule.ErrorTypeId}, MonitoredJobId={FormatValue((object?)rule.MonitoredJobId)}, FixCategory={rule.FixCategory}, ActionType={rule.ActionType}, IsAutoHealEligible={FormatValue(rule.IsAutoHealEligible)}, Enabled={FormatValue(rule.Enabled)}{stepSummary})",
             ct: ct);
 
         return Ok(new { rule.RuleId });
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPut("fix-policy-rules/{id:int}")]
     public async Task<IActionResult> UpdateFixPolicyRule(int id, [FromBody] UpsertFixPolicyRuleRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = await db.FixPolicyRules
@@ -1366,18 +1361,18 @@ public class ConfigController(
             entityType: "FixPolicyRule",
             entityId:   id.ToString(),
             eventType:  "FixPolicyUpdated",
-            actor:      req.OperatorId,
+            actor:      Actor,
             detail:     diff.Length > 0 ? diff : "No changes",
             ct: ct);
 
         return NoContent();
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpDelete("fix-policy-rules/{id:int}")]
     public async Task<IActionResult> DeleteFixPolicyRule(
-        int id, [FromQuery] string operatorId, CancellationToken ct)
+        int id, CancellationToken ct)
     {
-        if (MissingOperator(operatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = await db.FixPolicyRules.FindAsync([id], ct);
@@ -1392,7 +1387,7 @@ public class ConfigController(
             entityType: "FixPolicyRule",
             entityId:   id.ToString(),
             eventType:  "FixPolicyDeleted",
-            actor:      operatorId,
+            actor:      Actor,
             detail:     $"Soft-deleted FixPolicyRule {id} (JobTypeId={snapshotJobTypeId}, ErrorTypeId={snapshotErrorTypeId}, ActionType={snapshotActionType})",
             ct: ct);
 
@@ -1428,10 +1423,10 @@ public class ConfigController(
         }));
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPost("classification-rules")]
     public async Task<IActionResult> CreateClassificationRule([FromBody] UpsertClassificationRuleRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         // Duplicate guard (backend layer): at most one ENABLED rule per
         // (JobTypeId, Pattern). Returns an actionable 409 so the UI can offer
@@ -1457,7 +1452,7 @@ public class ConfigController(
             Confidence  = req.Confidence,
             Priority    = req.Priority,
             IsActive    = true,
-            CreatedBy   = req.OperatorId,
+            CreatedBy   = Actor,
             // Provenance when accepted from an /unconfigured cluster (else null).
             SuggestedBy         = req.SuggestedBy,
             SuggestedFromHash   = req.SuggestedFromHash,
@@ -1469,17 +1464,17 @@ public class ConfigController(
             entityType: "ClassificationRule",
             entityId:   saved.RuleId.ToString(),
             eventType:  "ClassificationRuleCreated",
-            actor:      req.OperatorId,
+            actor:      Actor,
             detail:     $"Created ClassificationRule (JobTypeId={saved.JobTypeId}, ErrorTypeId={saved.ErrorTypeId}, Pattern='{saved.Pattern}', Confidence={saved.Confidence}, Priority={saved.Priority})",
             ct: ct);
 
         return Ok(new { saved.RuleId });
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpPut("classification-rules/{id:int}")]
     public async Task<IActionResult> UpdateClassificationRule(int id, [FromBody] UpsertClassificationRuleRequest req, CancellationToken ct)
     {
-        if (MissingOperator(req.OperatorId, out var opErr)) return opErr;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rule = await db.ClassificationRules.FindAsync([id], ct);
@@ -1525,18 +1520,18 @@ public class ConfigController(
             entityType: "ClassificationRule",
             entityId:   id.ToString(),
             eventType:  "ClassificationRuleUpdated",
-            actor:      req.OperatorId,
+            actor:      Actor,
             detail:     diff.Length > 0 ? diff : "No changes",
             ct: ct);
 
         return NoContent();
     }
 
+    [Authorize(Policy = "RequireAdmin")]
     [HttpDelete("classification-rules/{id:int}")]
     public async Task<IActionResult> DeleteClassificationRule(
-        int id, [FromQuery] string operatorId, CancellationToken ct)
+        int id, CancellationToken ct)
     {
-        if (MissingOperator(operatorId, out var opErr)) return opErr;
 
         // Capture identifying fields before the hard delete so the audit
         // row remains intelligible after the rule is gone.
@@ -1552,7 +1547,7 @@ public class ConfigController(
             entityType: "ClassificationRule",
             entityId:   id.ToString(),
             eventType:  "ClassificationRuleDeleted",
-            actor:      operatorId,
+            actor:      Actor,
             detail:     $"Deleted ClassificationRule {id} (Pattern='{rulePattern}')",
             ct: ct);
 
@@ -1576,9 +1571,9 @@ public class ConfigController(
 
 // ── Request contracts ────────────────────────────────────────────────────────
 
-// Every Upsert*Request includes OperatorId so the audit row knows who acted.
-// Frontend passes "operator" as a literal for now (no auth yet); when authz
-// lands the frontend will swap to the authenticated user in one sweep.
+// The audit actor is the authenticated principal (server-side), never a client value,
+// so these request contracts carry NO operatorId. Authorization guarantees an
+// authenticated user reaches any write.
 
 public sealed record UpsertMonitoredJobRequest(
     string  Name,
@@ -1592,7 +1587,6 @@ public sealed record UpsertMonitoredJobRequest(
     int     PollingIntervalSeconds,
     bool    IsActive,
     string? Description,
-    string  OperatorId,
     /// <summary>Optional base folder for relative InputPathPattern captures.
     /// FS-scan jobs only; ignored when the regex captures an absolute path.</summary>
     string? InputFolder = null,
@@ -1602,7 +1596,6 @@ public sealed record UpsertMonitoredJobRequest(
 public sealed record UpsertScanSourceRequest(
     string  Name,
     int     ScanTypeId,
-    string  OperatorId,
     string? LogFolder         = null,
     string? SearchPatterns    = null,
     string? InputFolder       = null,
@@ -1622,7 +1615,6 @@ public sealed record UpsertScanCheckRuleRequest(
     string?  SourceIdColumn,
     string   Severity,
     string?  Description,
-    string   OperatorId,
     bool     IsActive = true,
     /// <summary>DB scans only — column on the source row that holds the
     /// input file path. Read into JobFailure.SourceFilePath when matched.</summary>
@@ -1651,7 +1643,6 @@ public sealed record UpsertClassificationRuleRequest(
     string  Pattern,
     decimal Confidence,
     int     Priority,
-    string  OperatorId,
     bool    IsActive = true,
     // Suggestion provenance — set only when accepted from an /unconfigured
     // cluster; null for manual creation. Applied on CREATE only (ignored on update).
@@ -1664,7 +1655,6 @@ public sealed record UpsertJobClassificationRuleRequest(
     string  Pattern,
     decimal Confidence,
     int     Priority,
-    string  OperatorId,
     bool    IsActive = true);
 
 public sealed record UpsertFixPolicyRuleRequest(
@@ -1676,7 +1666,6 @@ public sealed record UpsertFixPolicyRuleRequest(
     string? ActionPayload,
     bool    IsAutoHealEligible,
     bool    Enabled,
-    string  OperatorId,
     /// <summary>NULL = JobType-level default (applies to all jobs of JobTypeId).
     /// Set = MonitoredJob-scoped override that wins over the default for this one job.</summary>
     int?    MonitoredJobId = null,
@@ -1701,5 +1690,4 @@ public sealed record UpsertErrorTypeRequest(
     string  DisplayName,
     string? Description,
     string  Severity,
-    string  OperatorId,
     bool    IsActive = true);

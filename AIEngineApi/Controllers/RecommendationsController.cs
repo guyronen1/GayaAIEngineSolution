@@ -4,6 +4,7 @@ using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Interfaces.UseCases;
 using MaiaAI.Infrastructure.DataAccess;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -22,23 +23,27 @@ namespace AIEngineAPI.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/recommendations")]
+[Authorize(Policy = "RequireOperator")]   // operator decisions on recommendations
 public class RecommendationsController(
     IRecommendationRepository       recommendations,
     IOperatorActionRepository       operatorActions,
     IAuditRepository                audit,
     IJobRepository                  jobs,
     IExecuteFixesUseCase            execute,
-    IDbContextFactory<AiDbContext>  dbFactory) : ControllerBase
+    IDbContextFactory<AiDbContext>  dbFactory,
+    ICurrentUserAccessor            currentUser) : ControllerBase
 {
-    public sealed record DecisionRequest(string OperatorId);
+    // Actor is the authenticated principal — guaranteed present here because the
+    // controller requires RequireOperator (no anonymous reaches the action body).
+    private string Actor => currentUser.UserName!;
 
     [HttpPost("{id:int}/approve")]
-    public Task<IActionResult> Approve(int id, [FromBody] DecisionRequest req, CancellationToken ct)
-        => RecordDecisionAsync(id, approved: true, req, ct);
+    public Task<IActionResult> Approve(int id, CancellationToken ct)
+        => RecordDecisionAsync(id, approved: true, ct);
 
     [HttpPost("{id:int}/reject")]
-    public Task<IActionResult> Reject(int id, [FromBody] DecisionRequest req, CancellationToken ct)
-        => RecordDecisionAsync(id, approved: false, req, ct);
+    public Task<IActionResult> Reject(int id, CancellationToken ct)
+        => RecordDecisionAsync(id, approved: false, ct);
 
     /// <summary>
     /// Re-runs a fix that previously failed to execute. A failed executor
@@ -51,11 +56,8 @@ public class RecommendationsController(
     /// configured NOW. Only valid while the failure is in ManualRequired.
     /// </summary>
     [HttpPost("{id:int}/retry")]
-    public async Task<IActionResult> Retry(int id, [FromBody] DecisionRequest req, CancellationToken ct)
+    public async Task<IActionResult> Retry(int id, CancellationToken ct)
     {
-        if (req is null || string.IsNullOrWhiteSpace(req.OperatorId))
-            return BadRequest(new { Message = "operatorId is required." });
-
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rec = await db.AIRecommendations
             .Include(r => r.Failure)
@@ -87,10 +89,11 @@ public class RecommendationsController(
         rec.Failure.Status   = JobStatus.Failed;
         await db.SaveChangesAsync(ct);
 
+        var actor = Actor;
         await operatorActions.SaveAsync(new OperatorAction
         {
             RecommendationId = id,
-            OperatorId       = req.OperatorId,
+            OperatorId       = actor,
             ActionTaken      = "Retry",
             ActionTimestamp  = DateTime.Now,
         }, ct);
@@ -101,8 +104,8 @@ public class RecommendationsController(
             EntityType = "AiRecommendation",
             EntityId   = id.ToString(),
             EventType  = "FixRetried",
-            Actor      = req.OperatorId,
-            Detail     = $"Operator {req.OperatorId} retried recommendation {id} — failure re-armed " +
+            Actor      = actor,
+            Detail     = $"Operator {actor} retried recommendation {id} — failure re-armed " +
                          $"from ManualRequired to Failed and re-queued for execution (action: {rec.SuggestedAction}).",
             Timestamp  = DateTime.Now,
         }, ct);
@@ -122,11 +125,8 @@ public class RecommendationsController(
     }
 
     private async Task<IActionResult> RecordDecisionAsync(
-        int id, bool approved, DecisionRequest req, CancellationToken ct)
+        int id, bool approved, CancellationToken ct)
     {
-        if (req is null || string.IsNullOrWhiteSpace(req.OperatorId))
-            return BadRequest(new { Message = "operatorId is required." });
-
         // Need FailureId for the audit row, so fetch before mutating
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var rec = await db.AIRecommendations
@@ -140,11 +140,12 @@ public class RecommendationsController(
         if (!updated)
             return NotFound(new { Message = $"Recommendation {id} not found." });
 
+        var actor       = Actor;
         var actionTaken = approved ? "Approve" : "Reject";
         await operatorActions.SaveAsync(new OperatorAction
         {
             RecommendationId = id,
-            OperatorId       = req.OperatorId,
+            OperatorId       = actor,
             ActionTaken      = actionTaken,
             ActionTimestamp  = DateTime.Now,
         }, ct);
@@ -158,8 +159,8 @@ public class RecommendationsController(
             EntityType = "AiRecommendation",
             EntityId   = id.ToString(),
             EventType  = approved ? "OperatorApproved" : "OperatorRejected",
-            Actor      = req.OperatorId,
-            Detail     = $"Operator {req.OperatorId} {actionTaken.ToLowerInvariant()}d recommendation {id} " +
+            Actor      = actor,
+            Detail     = $"Operator {actor} {actionTaken.ToLowerInvariant()}d recommendation {id} " +
                          $"(action: {rec.SuggestedAction}).",
             Timestamp  = DateTime.Now,
         }, ct);
@@ -177,7 +178,7 @@ public class RecommendationsController(
             //     operator hasn't decided everything)
             //   - the failure is already past the Failed state (e.g.
             //     AwaitingManualAction because a sibling rec was approved)
-            await TransitionFailureIfLastRejectionAsync(rec.FailureId, id, db, req.OperatorId, ct);
+            await TransitionFailureIfLastRejectionAsync(rec.FailureId, id, db, actor, ct);
         }
 
         rec.OperatorApproved = approved;

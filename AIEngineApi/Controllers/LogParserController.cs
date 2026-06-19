@@ -1,11 +1,13 @@
 ﻿using AIEngineAPI.Models;
 using MaiaAI.Core.Interfaces;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AIEngineAPI.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize(Policy = "RequireOperator")]   // log-parsing utilities
 public class LogParserController(ILogParser logParser) : ControllerBase
 {
     [HttpPost("parse")]

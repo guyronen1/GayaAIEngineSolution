@@ -1,11 +1,13 @@
 ﻿using AIEngineAPI.Contracts;
 using MaiaAI.Core.Interfaces.UseCases;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AIEngineAPI.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize(Policy = "RequireOperator")]   // legacy directory-scan trigger
 public class PipelineController(IDirectoryPipelineUseCase pipeline) : ControllerBase
 {
     /// <summary>Scan a directory for log files and run the full classify → suggest → execute pipeline.</summary>

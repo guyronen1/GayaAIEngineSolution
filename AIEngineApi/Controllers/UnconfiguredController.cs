@@ -1,6 +1,7 @@
 using MaiaAI.Core.Analysis;
 using MaiaAI.Core.Enums;
 using MaiaAI.Infrastructure.DataAccess;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -20,6 +21,7 @@ namespace AIEngineAPI.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/unconfigured")]
+[Authorize(Policy = "RequireUser")]   // operational reads
 public class UnconfiguredController(
     IDbContextFactory<AiDbContext> dbFactory,
     IUnconfiguredClusterAnalyzer   analyzer) : ControllerBase

@@ -3,6 +3,7 @@ using MaiaAI.Application.Classification;
 using MaiaAI.Application.Maintenance;
 using MaiaAI.Application.Pipeline;
 using MaiaAI.Application.Remediation;
+using MaiaAI.Application.Security;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Interfaces.UseCases;
 
@@ -21,6 +22,7 @@ public static class ServiceRegistration
         services.AddScoped<IExecuteFixesUseCase,         ExecuteFixesUseCase>();
         services.AddScoped<IDirectoryPipelineUseCase,    DirectoryPipelineUseCase>();
         services.AddScoped<IScanHistoryRetentionService, ScanHistoryRetentionService>();
+        services.AddScoped<IAuthService,                 AuthService>();
 
         return services;
     }

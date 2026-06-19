@@ -8,6 +8,7 @@ using MaiaAI.Infrastructure.Fix;
 using MaiaAI.Infrastructure.Parsing;
 using MaiaAI.Infrastructure.Placeholders;
 using MaiaAI.Infrastructure.Scanning;
+using MaiaAI.Infrastructure.Security;
 using MaiaAI.Infrastructure.Workers;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -43,6 +44,12 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IMonitoredJobLeaseRepository,  SqlMonitoredJobLeaseRepository>();
         services.AddScoped<IOperatorActionRepository,     SqlOperatorActionRepository>();
         services.AddScoped<IScanRunHistoryRepository,     SqlScanRunHistoryRepository>();
+        services.AddScoped<IUserRepository,               SqlUserRepository>();
+        services.AddScoped<ISessionRepository,            SqlSessionRepository>();
+
+        // ── Auth: password hashing (PBKDF2 via Identity's PasswordHasher<T>) ─
+        // Stateless + thread-safe → singleton.
+        services.AddSingleton<IPasswordHasher, Pbkdf2PasswordHasher>();
 
         // ── Classification strategy (swap for ML/LLM here) ──────────────────
         services.AddScoped<IClassificationStrategy, RuleBasedClassifier>();

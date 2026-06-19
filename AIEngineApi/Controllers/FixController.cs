@@ -1,10 +1,12 @@
 ﻿using MaiaAI.Core.Interfaces.UseCases;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AIEngineAPI.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize(Policy = "RequireOperator")]   // manual fix-pipeline triggers
 public class FixController(
     IClassifyJobsUseCase        classify,
     IGenerateSuggestionsUseCase suggest,

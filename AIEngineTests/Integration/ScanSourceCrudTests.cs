@@ -50,7 +50,10 @@ public class ScanSourceCrudTests : IAsyncLifetime
             NullLogger<ConfigController>.Instance,
             new TestDbContextFactory(options),
             new IFileContentExtractor[] { new XmlContentExtractor(NullLogger<XmlContentExtractor>.Instance) },
-            new SqlFixScopeValidator());
+            new SqlFixScopeValidator(),
+            // Anonymous accessor (UserName null) → Actor() falls back to the request's
+            // operatorId, the Phase-1 behavior these tests assert against.
+            Mock.Of<ICurrentUserAccessor>());
     }
 
     public Task DisposeAsync() => _db.DisposeAsync().AsTask();
@@ -58,7 +61,7 @@ public class ScanSourceCrudTests : IAsyncLifetime
     private static UpsertScanSourceRequest Req(
         string name, int scanTypeId, string? logFolder = null, string? connectionName = null,
         string? logSourceUrl = null, bool includeSubfolders = false, bool isActive = true)
-        => new(name, scanTypeId, "operator",
+        => new(name, scanTypeId,
                LogFolder: logFolder, ConnectionName: connectionName, LogSourceUrl: logSourceUrl,
                IncludeSubfolders: includeSubfolders, IsActive: isActive);
 
@@ -170,9 +173,9 @@ public class ScanSourceCrudTests : IAsyncLifetime
         await _ctrl.CreateScanRuleForSource(id, new UpsertScanCheckRuleRequest(
             CheckType: "ErrorKeyword", SourceTable: null, TargetField: "ERROR",
             MinValue: null, MaxValue: null, ExpectedValue: null, WatermarkColumn: null,
-            SourceIdColumn: null, Severity: "Medium", Description: null, OperatorId: "operator"), default);
+            SourceIdColumn: null, Severity: "Medium", Description: null), default);
 
-        var del = await _ctrl.DeleteScanSource(id, "operator", default);
+        var del = await _ctrl.DeleteScanSource(id, default);
         Assert.IsType<NoContentResult>(del);
 
         // Re-read from the shared in-memory store (controller used separate contexts).
@@ -191,7 +194,7 @@ public class ScanSourceCrudTests : IAsyncLifetime
         var r = await _ctrl.CreateScanRuleForSource(id, new UpsertScanCheckRuleRequest(
             CheckType: "ErrorKeyword", SourceTable: null, TargetField: "FAIL",
             MinValue: null, MaxValue: null, ExpectedValue: null, WatermarkColumn: null,
-            SourceIdColumn: null, Severity: "High", Description: null, OperatorId: "operator"), default);
+            SourceIdColumn: null, Severity: "High", Description: null), default);
         Assert.IsType<OkObjectResult>(r);
         var rule = await _db.ScanCheckRules.FirstAsync(x => x.ScanSourceId == id);
         Assert.Equal(id,    rule.ScanSourceId);
@@ -210,7 +213,7 @@ public class ScanSourceCrudTests : IAsyncLifetime
         await _ctrl.UpdateScanSource(id, Req("Events-Renamed", FcType, logFolder: @"C:\In"), default);
         Assert.Contains(_audit.Rows, a => a.EventType == "ScanSourceUpdated" && a.Detail!.Contains("Name: 'Events' → 'Events-Renamed'"));
 
-        await _ctrl.DeleteScanSource(id, "operator", default);
+        await _ctrl.DeleteScanSource(id, default);
         Assert.Contains(_audit.Rows, a => a.EventType == "ScanSourceDeleted" && a.Detail!.Contains("Soft-deleted ScanSource"));
     }
 

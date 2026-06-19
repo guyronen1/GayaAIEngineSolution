@@ -1,4 +1,5 @@
 ﻿using MaiaAI.Core.Interfaces.UseCases;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AIEngineAPI.Controllers;
@@ -9,6 +10,7 @@ namespace AIEngineAPI.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
+[Authorize(Policy = "RequireOperator")]   // legacy in-DB pipeline trigger
 public class ProcessController(
     IClassifyJobsUseCase        classify,
     IGenerateSuggestionsUseCase suggest,

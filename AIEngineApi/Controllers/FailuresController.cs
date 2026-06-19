@@ -1,6 +1,7 @@
 using MaiaAI.Core.Entities;
 using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AIEngineAPI.Controllers;
@@ -20,19 +21,18 @@ namespace AIEngineAPI.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/failures")]
+[Authorize(Policy = "RequireOperator")]   // operator action on a failure
 public class FailuresController(
-    IJobRepository    jobs,
-    IAuditRepository  audit) : ControllerBase
+    IJobRepository        jobs,
+    IAuditRepository      audit,
+    ICurrentUserAccessor  currentUser) : ControllerBase
 {
-    public sealed record MarkResolvedRequest(string OperatorId);
+    // Authenticated principal — guaranteed present (RequireOperator gates the action).
+    private string Actor => currentUser.UserName!;
 
     [HttpPost("{id:int}/mark-resolved")]
-    public async Task<IActionResult> MarkResolved(
-        int id, [FromBody] MarkResolvedRequest req, CancellationToken ct)
+    public async Task<IActionResult> MarkResolved(int id, CancellationToken ct)
     {
-        if (req is null || string.IsNullOrWhiteSpace(req.OperatorId))
-            return BadRequest(new { Message = "operatorId is required." });
-
         // Fetch first so we can record the prior status in the audit detail
         // (lets an auditor see "was AwaitingManualAction → Resolved" vs
         // "was Failed → Resolved" without joining other tables).
@@ -48,14 +48,15 @@ public class FailuresController(
 
         await jobs.UpdateStatusAsync(id, JobStatus.Resolved, ct);
 
+        var actor = Actor;
         await audit.WriteAsync(new AuditLog
         {
             FailureId  = id,
             EntityType = "JobFailure",
             EntityId   = id.ToString(),
             EventType  = "ManuallyResolved",
-            Actor      = req.OperatorId,
-            Detail     = $"Operator {req.OperatorId} marked failure {id} as resolved (was {priorStatus}).",
+            Actor      = actor,
+            Detail     = $"Operator {actor} marked failure {id} as resolved (was {priorStatus}).",
             Timestamp  = DateTime.Now,
         }, ct);
 

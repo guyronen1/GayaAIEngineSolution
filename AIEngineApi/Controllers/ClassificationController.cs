@@ -1,10 +1,12 @@
 ﻿using MaiaAI.Core.Interfaces.UseCases;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AIEngineAPI.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize(Policy = "RequireOperator")]   // manual classify trigger
 public class ClassificationController(IClassifyJobsUseCase classifyUseCase) : ControllerBase
 {
     [HttpPost("classify-failures")]

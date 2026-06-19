@@ -26,6 +26,9 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
     public DbSet<ScanDbWatermark>     ScanDbWatermarks    => Set<ScanDbWatermark>();
     public DbSet<MonitoredJobLease>   MonitoredJobLeases  => Set<MonitoredJobLease>();
     public DbSet<ScanRunHistory>      ScanRunHistory      => Set<ScanRunHistory>();
+    public DbSet<Role>                Roles               => Set<Role>();
+    public DbSet<User>                Users               => Set<User>();
+    public DbSet<UserSession>         UserSessions        => Set<UserSession>();
 
     protected override void OnModelCreating(ModelBuilder mb)
     {
@@ -49,6 +52,9 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
         ConfigureMonitoredJobRule(mb);
         ConfigureMonitoredJobLease(mb);
         ConfigureScanRunHistory(mb);
+        ConfigureRole(mb);
+        ConfigureUser(mb);
+        ConfigureUserSession(mb);
         SeedData(mb);
     }
 
@@ -627,10 +633,76 @@ public class AiDbContext(DbContextOptions<AiDbContext> options) : DbContext(opti
         });
     }
 
+    private static void ConfigureRole(ModelBuilder mb)
+    {
+        mb.Entity<Role>(e =>
+        {
+            e.ToTable("Roles");
+            e.HasKey(r => r.RoleId);
+            // RoleId is aligned to MaiaRole and seeded explicitly, so it must not
+            // be store-generated.
+            e.Property(r => r.RoleId).ValueGeneratedNever();
+            e.HasIndex(r => r.Name).IsUnique();
+            e.Property(r => r.Name).IsRequired().HasMaxLength(50);
+        });
+    }
+
+    private static void ConfigureUser(ModelBuilder mb)
+    {
+        mb.Entity<User>(e =>
+        {
+            e.ToTable("Users");
+            e.HasKey(u => u.UserId);
+            // Unique-CI on Username via the DB's default collation (matches the
+            // case-insensitive lookup in SqlUserRepository).
+            e.HasIndex(u => u.Username).IsUnique();
+            e.Property(u => u.Username).IsRequired().HasMaxLength(100);
+            // Identity's PBKDF2 v3 string is ~84 chars; 500 leaves ample headroom
+            // for a future format/iteration bump.
+            e.Property(u => u.PasswordHash).IsRequired().HasMaxLength(500);
+            e.Property(u => u.IsActive).HasDefaultValue(true);
+            e.Property(u => u.MustChangePassword).HasDefaultValue(false);
+            e.Property(u => u.CreatedAt).IsRequired().HasDefaultValueSql("GETDATE()");
+
+            e.HasOne(u => u.Role)
+                .WithMany(r => r.Users)
+                .HasForeignKey(u => u.RoleId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+    }
+
+    private static void ConfigureUserSession(ModelBuilder mb)
+    {
+        mb.Entity<UserSession>(e =>
+        {
+            e.ToTable("UserSessions");
+            e.HasKey(s => s.SessionId);
+            e.HasIndex(s => s.Token).IsUnique();
+            e.Property(s => s.Token).IsRequired().HasMaxLength(200);
+            e.Property(s => s.CreatedAt).IsRequired().HasDefaultValueSql("GETDATE()");
+            e.Property(s => s.LastActivityAt).IsRequired().HasDefaultValueSql("GETDATE()");
+
+            e.HasOne(s => s.User)
+                .WithMany(u => u.Sessions)
+                .HasForeignKey(s => s.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+    }
+
     // ── Seed data ────────────────────────────────────────────────────────────
 
     private static void SeedData(ModelBuilder mb)
     {
+        // Roles are a fixed set; RoleId == (int)MaiaRole. The bootstrap admin USER
+        // is NOT seeded here — its PBKDF2 hash uses a random salt (non-deterministic),
+        // which would break HasData drift detection. It's inserted via raw SQL in the
+        // AddAuthTables migration instead.
+        mb.Entity<Role>().HasData(
+            new Role { RoleId = (int)MaiaRole.User,          Name = "User" },
+            new Role { RoleId = (int)MaiaRole.Operator,      Name = "Operator" },
+            new Role { RoleId = (int)MaiaRole.Administrator, Name = "Administrator" }
+        );
+
         mb.Entity<JobType>().HasData(
             new JobType { JobTypeId = 1, Name = "DTSX",        Description = "SQL Server Integration Services package", IsActive = true },
             new JobType { JobTypeId = 2, Name = "SqlAgent",    Description = "SQL Server Agent Job",                   IsActive = true },

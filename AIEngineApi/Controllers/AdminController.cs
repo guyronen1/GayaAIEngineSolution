@@ -1,4 +1,5 @@
 using MaiaAI.Core.Interfaces;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AIEngineAPI.Controllers;
@@ -10,6 +11,7 @@ namespace AIEngineAPI.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/admin")]
+[Authorize(Policy = "RequireAdmin")]   // destructive/operational maintenance
 public class AdminController(
     IScanHistoryRetentionService retention,
     IWorkerControlService        workerControl) : ControllerBase

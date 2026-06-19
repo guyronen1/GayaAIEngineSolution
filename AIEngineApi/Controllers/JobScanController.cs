@@ -3,6 +3,7 @@ using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
 using MaiaAI.Core.Interfaces.UseCases;
 using MaiaAI.Core.Results;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AIEngineAPI.Controllers;
@@ -18,6 +19,7 @@ namespace AIEngineAPI.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
+[Authorize(Policy = "RequireOperator")]   // manual scan / classify triggers
 public class JobScanController(
     IMonitoredJobRepository      jobRepo,
     IMonitoredJobLeaseRepository leaseRepo,
