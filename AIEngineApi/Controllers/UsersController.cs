@@ -1,6 +1,7 @@
 using MaiaAI.Core.Entities;
 using MaiaAI.Core.Enums;
 using MaiaAI.Core.Interfaces;
+using MaiaAI.Core.Security;
 using MaiaAI.Infrastructure.DataAccess;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -59,8 +60,8 @@ public class UsersController(
     {
         if (string.IsNullOrWhiteSpace(req.Username))
             return BadRequest(new { error = "UsernameRequired", message = "Username is required." });
-        if (string.IsNullOrWhiteSpace(req.Password))
-            return BadRequest(new { error = "PasswordRequired", message = "An initial password is required." });
+        if (PasswordPolicy.Validate(req.Password) is { } pwErr)
+            return BadRequest(new { error = "PasswordTooShort", message = pwErr });
         if (!TryResolveRole(req.Role, out var roleId))
             return BadRequest(new { error = "UnknownRole", message = "Role must be User, Operator, or Administrator." });
 
@@ -121,8 +122,8 @@ public class UsersController(
     [HttpPost("{id:int}/reset-password")]
     public async Task<IActionResult> ResetPassword(int id, [FromBody] ResetPasswordRequest req, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(req.NewPassword))
-            return BadRequest(new { error = "PasswordRequired", message = "A new password is required." });
+        if (PasswordPolicy.Validate(req.NewPassword) is { } pwErr)
+            return BadRequest(new { error = "PasswordTooShort", message = pwErr });
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var user = await db.Users.FindAsync([id], ct);

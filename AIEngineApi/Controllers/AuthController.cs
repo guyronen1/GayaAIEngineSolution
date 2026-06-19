@@ -72,6 +72,8 @@ public class AuthController(
             return Unauthorized();
         if (req is null || string.IsNullOrWhiteSpace(req.NewPassword))
             return BadRequest(new { error = "MissingNewPassword", message = "A new password is required." });
+        if (MaiaAI.Core.Security.PasswordPolicy.Validate(req.NewPassword) is { } pwErr)
+            return BadRequest(new { error = "PasswordTooShort", message = pwErr });
 
         var ok = await auth.ChangePasswordAsync(userId, req.CurrentPassword ?? string.Empty, req.NewPassword, ct);
         if (!ok)
