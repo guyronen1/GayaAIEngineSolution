@@ -21,7 +21,7 @@ public sealed class StoredProcedureExecutor(
 {
     public FixActionType ActionType => FixActionType.StoredProcedure;
 
-    public async Task<bool> ExecuteAsync(
+    public async Task<FixActionResult> ExecuteAsync(
         string? payload,
         AiRecommendation recommendation,
         CancellationToken ct = default)
@@ -74,7 +74,7 @@ public sealed class StoredProcedureExecutor(
             logger.LogError(ex,
                 "StoredProcedureExecutor: {SpName} failed for Failure {FailureId}",
                 spName, recommendation.FailureId);
-            return false;
+            return FixActionResult.Fail(ex.Message);
         }
     }
 

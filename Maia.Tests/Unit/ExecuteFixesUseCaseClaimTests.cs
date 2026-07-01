@@ -75,7 +75,7 @@ public class ExecuteFixesUseCaseClaimTests
                 It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<AiRecommendation> { rec });
         _engine.Setup(e => e.ExecuteAsync(rec, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(FixOutcome.Success);
+            .ReturnsAsync(new FixResult(FixOutcome.Success));
 
         await CreateSut().ExecuteAsync();
 
@@ -96,7 +96,7 @@ public class ExecuteFixesUseCaseClaimTests
                 It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<AiRecommendation> { rec });
         _engine.Setup(e => e.ExecuteAsync(rec, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(FixOutcome.Failed);
+            .ReturnsAsync(new FixResult(FixOutcome.Failed));
 
         await CreateSut().ExecuteAsync();
 
@@ -118,7 +118,7 @@ public class ExecuteFixesUseCaseClaimTests
                 It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<AiRecommendation> { rec });
         _engine.Setup(e => e.ExecuteAsync(rec, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(FixOutcome.NoAutomatedAction);
+            .ReturnsAsync(new FixResult(FixOutcome.NoAutomatedAction));
 
         await CreateSut().ExecuteAsync();
 
@@ -142,7 +142,7 @@ public class ExecuteFixesUseCaseClaimTests
                 It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<AiRecommendation> { rec });
         _engine.Setup(e => e.ExecuteAsync(rec, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(FixOutcome.NoAutomatedAction);
+            .ReturnsAsync(new FixResult(FixOutcome.NoAutomatedAction));
 
         await CreateSut().ExecuteAsync();
 

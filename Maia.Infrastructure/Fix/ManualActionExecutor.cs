@@ -12,7 +12,7 @@ public sealed class ManualActionExecutor(ILogger<ManualActionExecutor> logger) :
 {
     public FixActionType ActionType => FixActionType.Manual;
 
-    public Task<bool> ExecuteAsync(
+    public Task<FixActionResult> ExecuteAsync(
         string? payload,
         AiRecommendation recommendation,
         CancellationToken ct = default)
@@ -20,6 +20,7 @@ public sealed class ManualActionExecutor(ILogger<ManualActionExecutor> logger) :
         logger.LogWarning(
             "Failure {FailureId} requires manual operator intervention — automated fix skipped",
             recommendation.FailureId);
-        return Task.FromResult(false);
+        return Task.FromResult(FixActionResult.Fail(
+            "Manual policy — no automated action; operator must complete off-system."));
     }
 }

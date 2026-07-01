@@ -21,7 +21,7 @@ public sealed class DefaultFixEngine(
     IFixLogRepository                 fixLogs,
     ILogger<DefaultFixEngine>         logger) : IFixEngine
 {
-    public async Task<FixOutcome> ExecuteAsync(
+    public async Task<FixResult> ExecuteAsync(
         AiRecommendation recommendation,
         CancellationToken ct = default)
     {
@@ -76,7 +76,7 @@ public sealed class DefaultFixEngine(
         return FixOutcome.Failed;
     }
 
-    private async Task<FixOutcome> ExecuteByPolicyAsync(
+    private async Task<FixResult> ExecuteByPolicyAsync(
         FixPolicyRule    policy,
         AiRecommendation recommendation,
         CancellationToken ct)
@@ -114,11 +114,13 @@ public sealed class DefaultFixEngine(
             "Executing {ActionType} fix for Failure {FailureId} via policy rule {RuleId}",
             policy.ActionType, recommendation.FailureId, policy.RuleId);
 
-        var ok = await executor.ExecuteAsync(policy.ActionPayload, recommendation, ct);
-        return ok ? FixOutcome.Success : FixOutcome.Failed;
+        var result = await executor.ExecuteAsync(policy.ActionPayload, recommendation, ct);
+        // Propagate the executor's detail (e.g. the SQL error) so it reaches
+        // FixExecutionLog.ResultDetail and shows in the failure drawer.
+        return new FixResult(result.Success ? FixOutcome.Success : FixOutcome.Failed, result.Detail);
     }
 
-    private async Task<FixOutcome> ExecuteCompositeAsync(
+    private async Task<FixResult> ExecuteCompositeAsync(
         FixPolicyRule    policy,
         AiRecommendation recommendation,
         CancellationToken ct)
@@ -166,10 +168,11 @@ public sealed class DefaultFixEngine(
                 logger.LogInformation(
                     "Composite rule {RuleId} step {StepOrder} ({ActionType}) running for Failure {FailureId}",
                     policy.RuleId, step.StepOrder, step.ActionType, recommendation.FailureId);
-                stepOk = await executor.ExecuteAsync(step.ActionPayload, recommendation, ct);
+                var stepRes = await executor.ExecuteAsync(step.ActionPayload, recommendation, ct);
+                stepOk = stepRes.Success;
                 resultDetail = stepOk
                     ? $"Step {step.StepOrder} ({step.ActionType}) succeeded."
-                    : $"Step {step.StepOrder} ({step.ActionType}) failed.";
+                    : $"Step {step.StepOrder} ({step.ActionType}) failed — {stepRes.Detail ?? "no detail"}";
             }
 
             if (!stepOk) anyFailed = true;

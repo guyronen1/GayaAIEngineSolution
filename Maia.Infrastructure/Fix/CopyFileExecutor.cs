@@ -28,7 +28,7 @@ public sealed class CopyFileExecutor(
 
     public FixActionType ActionType => FixActionType.CopyFile;
 
-    public async Task<bool> ExecuteAsync(
+    public async Task<FixActionResult> ExecuteAsync(
         string? payload,
         AiRecommendation recommendation,
         CancellationToken ct = default)
@@ -78,7 +78,7 @@ public sealed class CopyFileExecutor(
             logger.LogError(
                 "CopyFileExecutor: source not found '{Source}' for Failure {FailureId}",
                 sourcePath, recommendation.FailureId);
-            return false;
+            return FixActionResult.Fail($"Source file not found: {sourcePath}");
         }
 
         var destDir = Path.GetDirectoryName(destPath);
@@ -142,7 +142,7 @@ public sealed class CopyFileExecutor(
             logger.LogError(ex,
                 "CopyFileExecutor: copy '{Source}' → '{Dest}' failed for Failure {FailureId}",
                 sourcePath, destPath, recommendation.FailureId);
-            return false;
+            return FixActionResult.Fail(ex.Message);
         }
     }
 

@@ -49,4 +49,29 @@ public class ClassificationMatcherTests
     [InlineData("x", "   ")]   // whitespace-only pattern collapses to empty → no match
     public void EmptyOrNull_NoMatch(string? line, string? pattern)
         => Assert.False(ClassificationMatcher.IsMatch(line, pattern));
+
+    // ── DB-scan "Field=Value" token (DatabaseScanStrategy.BuildRowMessage) ──────
+    // A ValueEquals failure message is verbose: "[Table].[Field] = v matches error
+    // value v (id=…)". An intuitive literal pattern "Field=Value" can't substring-
+    // match it (there's "] = " between field and value). BuildRowMessage appends a
+    // compact space-free token "[Field=ExpectedValue]" so the intuitive pattern
+    // matches at runtime — and the coverage-marker/flow synthetic keyword (also
+    // "Field=Value") genuinely appears in the message. See DECISIONS.
+
+    [Fact]
+    public void DbScanValueEquals_TokenlessMessage_DoesNotMatchLiteralPattern()
+    {
+        // The pre-token message shape — the reason failures went unclassified.
+        var msg = "[dbo.Event].[EventStatusCode] = 8 matches error value 8 (id=abc)";
+        Assert.False(ClassificationMatcher.IsMatch(msg, "EventStatusCode=8"));
+    }
+
+    [Fact]
+    public void DbScanValueEquals_WithToken_MatchesLiteralPattern()
+    {
+        // BuildRowMessage now appends " [EventStatusCode=8]".
+        var msg = "[dbo.Event].[EventStatusCode] = 8 matches error value 8 (id=abc) [EventStatusCode=8]";
+        Assert.True(ClassificationMatcher.IsMatch(msg, "EventStatusCode=8"));
+        Assert.False(ClassificationMatcher.IsMatch(msg, "EventStatusCode=9")); // =9 must not match the =8 message
+    }
 }

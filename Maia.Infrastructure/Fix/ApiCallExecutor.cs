@@ -18,7 +18,7 @@ public sealed class ApiCallExecutor(
 {
     public FixActionType ActionType => FixActionType.ApiCall;
 
-    public async Task<bool> ExecuteAsync(
+    public async Task<FixActionResult> ExecuteAsync(
         string? payload,
         AiRecommendation recommendation,
         CancellationToken ct = default)
@@ -53,7 +53,7 @@ public sealed class ApiCallExecutor(
             logger.LogWarning(
                 "ApiCallExecutor: POST {Url} returned {StatusCode} for Failure {FailureId}",
                 url, (int)response.StatusCode, recommendation.FailureId);
-            return false;
+            return FixActionResult.Fail($"Endpoint returned HTTP {(int)response.StatusCode}.");
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested && !ct.IsCancellationRequested)
         {
@@ -67,7 +67,7 @@ public sealed class ApiCallExecutor(
             logger.LogError(ex,
                 "ApiCallExecutor: HTTP call to {Url} failed for Failure {FailureId}",
                 url, recommendation.FailureId);
-            return false;
+            return FixActionResult.Fail(ex.Message);
         }
     }
 }

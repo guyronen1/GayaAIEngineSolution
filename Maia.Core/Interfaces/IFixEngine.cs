@@ -28,10 +28,21 @@ public enum FixOutcome
 }
 
 /// <summary>
+/// The fix engine's <see cref="FixOutcome"/> plus an optional <see cref="Detail"/>
+/// propagated up from the executor (e.g. the SQL error). ExecuteFixesUseCase writes
+/// Detail into FixExecutionLog.ResultDetail. The implicit FixOutcome conversion keeps
+/// detail-less returns terse (<c>return FixOutcome.Failed;</c> still compiles).
+/// </summary>
+public readonly record struct FixResult(FixOutcome Outcome, string? Detail = null)
+{
+    public static implicit operator FixResult(FixOutcome outcome) => new(outcome);
+}
+
+/// <summary>
 /// Executes a concrete remediation action for a recommendation.
 /// Each FixCategory dispatches to a different implementation strategy.
 /// </summary>
 public interface IFixEngine
 {
-    Task<FixOutcome> ExecuteAsync(AiRecommendation recommendation, CancellationToken ct = default);
+    Task<FixResult> ExecuteAsync(AiRecommendation recommendation, CancellationToken ct = default);
 }

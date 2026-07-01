@@ -233,9 +233,16 @@ public sealed class DatabaseScanStrategy(
             CheckType.ColumnRange =>
                 $"[{rule.SourceTable}].[{rule.TargetField}] = {value} is outside " +
                 $"range [{rule.MinValue?.ToString() ?? "−∞"}, {rule.MaxValue?.ToString() ?? "+∞"}] ({rowId})" +
+                // Compact, space-free classifier token so an intuitive pattern
+                // ("Amount") matches via substring, and the coverage heuristic's
+                // synthetic keyword genuinely appears in the message. See DECISIONS.
+                $" [{rule.TargetField}={value}]" +
                 (rule.Description is not null ? $" — {rule.Description}" : ""),
             CheckType.ValueEquals =>
                 $"[{rule.SourceTable}].[{rule.TargetField}] = {value} matches error value {rule.ExpectedValue} ({rowId})" +
+                // Token uses ExpectedValue (the operator-typed, canonical form) so a
+                // literal "Field=Value" pattern matches at runtime without wildcards.
+                $" [{rule.TargetField}={rule.ExpectedValue}]" +
                 (rule.Description is not null ? $" — {rule.Description}" : ""),
             // Predictable, classifier-matchable shape; Description leads when set.
             CheckType.SqlQuery =>

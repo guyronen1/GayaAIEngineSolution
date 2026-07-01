@@ -50,7 +50,7 @@ public class DefaultFixEngineCompositeTests
         var rec = MakeRec(failureId: 7, errorTypeId: 1, jobTypeId: 1);
         var outcome = await engine.ExecuteAsync(rec);
 
-        Assert.Equal(FixOutcome.Success, outcome);
+        Assert.Equal(FixOutcome.Success, outcome.Outcome);
         Assert.Equal(3, logged.Count);
         Assert.All(logged, log => Assert.True(log.Success));
     }
@@ -67,10 +67,10 @@ public class DefaultFixEngineCompositeTests
         var executedActions = new List<FixActionType>();
         sqlExecutor.Setup(e => e.ExecuteAsync(It.IsAny<string?>(), It.IsAny<AiRecommendation>(), It.IsAny<CancellationToken>()))
             .Callback(() => executedActions.Add(FixActionType.SqlScript))
-            .ReturnsAsync(true);
+            .ReturnsAsync(FixActionResult.Ok());
         scriptExecutor.Setup(e => e.ExecuteAsync(It.IsAny<string?>(), It.IsAny<AiRecommendation>(), It.IsAny<CancellationToken>()))
             .Callback(() => executedActions.Add(FixActionType.Script))
-            .ReturnsAsync(false);                // ← the failing step
+            .ReturnsAsync(FixActionResult.Fail("step failed"));   // ← the failing step
 
         var policy = MakeCompositePolicy(
             ruleId: 200,
@@ -97,7 +97,7 @@ public class DefaultFixEngineCompositeTests
 
         var outcome = await engine.ExecuteAsync(MakeRec(7, 1, 1));
 
-        Assert.Equal(FixOutcome.Failed, outcome);
+        Assert.Equal(FixOutcome.Failed, outcome.Outcome);
         // All three steps ran in order — best-effort, no abort.
         Assert.Equal(
             new[] { FixActionType.SqlScript, FixActionType.Script, FixActionType.SqlScript },
@@ -128,7 +128,7 @@ public class DefaultFixEngineCompositeTests
         var payloadsExecuted = new List<string?>();
         executor.Setup(e => e.ExecuteAsync(It.IsAny<string?>(), It.IsAny<AiRecommendation>(), It.IsAny<CancellationToken>()))
             .Callback<string?, AiRecommendation, CancellationToken>((payload, _, _) => payloadsExecuted.Add(payload))
-            .ReturnsAsync(true);
+            .ReturnsAsync(FixActionResult.Ok());
 
         _fixLogs.Setup(r => r.SaveAsync(It.IsAny<FixExecutionLog>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
@@ -160,7 +160,7 @@ public class DefaultFixEngineCompositeTests
 
         var outcome = await engine.ExecuteAsync(MakeRec(7, 1, 1));
 
-        Assert.Equal(FixOutcome.Failed, outcome);
+        Assert.Equal(FixOutcome.Failed, outcome.Outcome);
     }
 
     [Fact]
@@ -190,7 +190,7 @@ public class DefaultFixEngineCompositeTests
 
         var outcome = await engine.ExecuteAsync(MakeRec(7, 1, 1));
 
-        Assert.Equal(FixOutcome.Failed, outcome);
+        Assert.Equal(FixOutcome.Failed, outcome.Outcome);
         Assert.Equal(2, logged.Count);
         Assert.False(logged[0].Success);                // missing executor
         Assert.Contains("no executor", logged[0].ResultDetail, StringComparison.OrdinalIgnoreCase);
@@ -242,7 +242,7 @@ public class DefaultFixEngineCompositeTests
         mock.SetupGet(e => e.ActionType).Returns(type);
         mock.Setup(e => e.ExecuteAsync(It.IsAny<string?>(),
                 It.IsAny<AiRecommendation>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(returns);
+            .ReturnsAsync(new FixActionResult(returns));
         return mock;
     }
 }

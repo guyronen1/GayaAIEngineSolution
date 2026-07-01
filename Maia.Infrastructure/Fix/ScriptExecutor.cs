@@ -23,7 +23,7 @@ public sealed class ScriptExecutor(
 {
     public FixActionType ActionType => FixActionType.Script;
 
-    public async Task<bool> ExecuteAsync(
+    public async Task<FixActionResult> ExecuteAsync(
         string? payload,
         AiRecommendation recommendation,
         CancellationToken ct = default)
@@ -73,7 +73,7 @@ public sealed class ScriptExecutor(
             logger.LogWarning(
                 "ScriptExecutor: '{Executable}' exited {ExitCode} for Failure {FailureId}. Stderr: {Stderr}",
                 executable, process.ExitCode, recommendation.FailureId, stderr);
-            return false;
+            return FixActionResult.Fail($"Script exited {process.ExitCode}. {stderr}".Trim());
         }
         catch (OperationCanceledException)
         {
@@ -87,7 +87,7 @@ public sealed class ScriptExecutor(
             logger.LogError(ex,
                 "ScriptExecutor: Failed to launch '{Executable}' for Failure {FailureId}",
                 executable, recommendation.FailureId);
-            return false;
+            return FixActionResult.Fail(ex.Message);
         }
     }
 }

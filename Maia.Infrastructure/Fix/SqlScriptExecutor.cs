@@ -21,6 +21,10 @@ namespace Maia.Infrastructure.Fix;
 /// that interface for the full token list. Substitution is non-strict;
 /// unresolved placeholders become empty strings (a SQL that uses
 /// {sourceId} on a failure with null SourceId still runs against "").
+///
+/// Failure paths return <see cref="FixActionResult.Fail"/> with the real reason
+/// (SQL exception message, "0 rows", timeout, missing connection) so it surfaces
+/// in the failure drawer via FixExecutionLog.ResultDetail.
 /// </summary>
 public sealed class SqlScriptExecutor(
     IDbContextFactory<MaiaDbContext> factory,
@@ -30,7 +34,7 @@ public sealed class SqlScriptExecutor(
 {
     public FixActionType ActionType => FixActionType.SqlScript;
 
-    public async Task<bool> ExecuteAsync(
+    public async Task<FixActionResult> ExecuteAsync(
         string? payload,
         AiRecommendation recommendation,
         CancellationToken ct = default)
@@ -39,7 +43,7 @@ public sealed class SqlScriptExecutor(
         {
             logger.LogError("SqlScriptExecutor: ActionPayload (SQL script) is required for Failure {FailureId}",
                 recommendation.FailureId);
-            return false;
+            return FixActionResult.Fail("No SQL script is configured on this fix policy.");
         }
 
         var (connectionName, sqlTemplate) = SplitPayload(payload);
@@ -54,7 +58,7 @@ public sealed class SqlScriptExecutor(
         if (failure is null)
         {
             logger.LogError("SqlScriptExecutor: Failure {FailureId} not found", recommendation.FailureId);
-            return false;
+            return FixActionResult.Fail($"Failure {recommendation.FailureId} not found.");
         }
 
         connectionName ??= failure.ScanSource?.ConnectionName ?? "DefaultConnection";
@@ -64,7 +68,7 @@ public sealed class SqlScriptExecutor(
             logger.LogError(
                 "SqlScriptExecutor: Connection '{ConnectionName}' not found in configuration (Failure {FailureId})",
                 connectionName, recommendation.FailureId);
-            return false;
+            return FixActionResult.Fail($"Connection '{connectionName}' is not configured on this server.");
         }
 
         var sql = await resolver.ResolveAsync(sqlTemplate, recommendation, ct);
@@ -88,7 +92,11 @@ public sealed class SqlScriptExecutor(
                 recommendation.FailureId, connectionName, affected);
 
             // Zero rows affected → SQL ran but matched nothing. Treat as failure so operator can investigate.
-            return affected > 0;
+            return affected > 0
+                ? FixActionResult.Ok($"{affected} row(s) updated on '{connectionName}'.")
+                : FixActionResult.Fail(
+                    "SQL ran but matched 0 rows — the WHERE matched nothing " +
+                    "(check the {sourceId} value and that the target row still exists).");
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested && !ct.IsCancellationRequested)
         {
@@ -97,14 +105,16 @@ public sealed class SqlScriptExecutor(
             logger.LogWarning(
                 "SqlScriptExecutor: Script timed out after {Seconds}s for Failure {FailureId} on '{ConnectionName}'",
                 ExecutorTimeouts.Default.TotalSeconds, recommendation.FailureId, connectionName);
-            return false;
+            return FixActionResult.Fail(
+                $"SQL timed out after {ExecutorTimeouts.Default.TotalSeconds:0}s on '{connectionName}'.");
         }
         catch (Exception ex)
         {
             logger.LogError(ex,
                 "SqlScriptExecutor: Script failed for Failure {FailureId} on '{ConnectionName}'",
                 recommendation.FailureId, connectionName);
-            return false;
+            // The real reason (e.g. "Invalid column name 'updateUser'.") — surfaced to the drawer.
+            return FixActionResult.Fail(ex.Message);
         }
     }
 

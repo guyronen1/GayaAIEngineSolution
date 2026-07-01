@@ -60,10 +60,10 @@ public sealed class ExecuteFixesUseCase(
             // (FixCategory=Retry, ActionType=Manual) case — that combo would
             // wrongly route operator-approved manual fixes to ManualRequired.
             // ActionType (carried by policy) is the truth; FixOutcome encodes it.
-            var isOperatorApprovedManual = outcome == FixOutcome.NoAutomatedAction
+            var isOperatorApprovedManual = outcome.Outcome == FixOutcome.NoAutomatedAction
                                          && rec.OperatorApproved == true;
 
-            var (logSuccess, logDetail, eventType, eventDetail, newStatus) = outcome switch
+            var (logSuccess, logDetail, eventType, eventDetail, newStatus) = outcome.Outcome switch
             {
                 FixOutcome.Success =>
                     (true,  "Fix applied successfully.",
@@ -86,14 +86,19 @@ public sealed class ExecuteFixesUseCase(
                      $"Manual policy with no operator approval for recommendation {rec.RecommendationId}.",
                      JobStatus.ManualRequired),
 
-                // Genuine failure — executor ran and didn't succeed
+                // Genuine failure — executor ran and didn't succeed. Surface the
+                // executor's real reason (e.g. "Invalid column name 'updateUser'.")
+                // into ResultDetail so the operator sees it in the failure drawer.
                 _ =>
-                    (false, "Automatic fix did not complete.",
+                    (false,
+                     string.IsNullOrWhiteSpace(outcome.Detail)
+                        ? "Automatic fix did not complete."
+                        : $"Fix failed: {outcome.Detail}",
                      "FixFailed",
-                     $"Failed {rec.FixCategory} fix for recommendation {rec.RecommendationId}.",
+                     $"Failed {rec.FixCategory} fix for recommendation {rec.RecommendationId}: {outcome.Detail}",
                      JobStatus.ManualRequired),
             };
-            var success = outcome == FixOutcome.Success;
+            var success = outcome.Outcome == FixOutcome.Success;
 
             await fixLogs.SaveAsync(new FixExecutionLog
             {

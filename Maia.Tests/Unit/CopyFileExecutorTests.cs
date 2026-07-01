@@ -40,7 +40,7 @@ public class CopyFileExecutorTests : IDisposable
 
         var ok = await CreateSut().ExecuteAsync($"{src}|{dest}", MakeRec());
 
-        Assert.True(ok);
+        Assert.True(ok.Success);
         Assert.True(File.Exists(dest));
         Assert.Equal("hello", await File.ReadAllTextAsync(dest));
         // Atomic-copy intermediate file must be cleaned up.
@@ -56,7 +56,7 @@ public class CopyFileExecutorTests : IDisposable
 
         var ok = await CreateSut().ExecuteAsync($"{src}|{dest}", MakeRec());
 
-        Assert.False(ok);
+        Assert.False(ok.Success);
         Assert.False(File.Exists(dest));
     }
 
@@ -69,7 +69,7 @@ public class CopyFileExecutorTests : IDisposable
 
         var ok = await CreateSut().ExecuteAsync($"{src}|{dest}", MakeRec());
 
-        Assert.True(ok);
+        Assert.True(ok.Success);
         Assert.Equal("new content", await File.ReadAllTextAsync(dest));
     }
 
@@ -82,7 +82,7 @@ public class CopyFileExecutorTests : IDisposable
 
         var ok = await CreateSut().ExecuteAsync($"{src}|{dest}", MakeRec());
 
-        Assert.True(ok);
+        Assert.True(ok.Success);
         Assert.True(File.Exists(dest));
     }
 
@@ -90,21 +90,21 @@ public class CopyFileExecutorTests : IDisposable
     public async Task Execute_PayloadMalformed_NoPipe_ReturnsFalse()
     {
         var ok = await CreateSut().ExecuteAsync("no-pipe-anywhere", MakeRec());
-        Assert.False(ok);
+        Assert.False(ok.Success);
     }
 
     [Fact]
     public async Task Execute_PayloadMalformed_EmptyDest_ReturnsFalse()
     {
         var ok = await CreateSut().ExecuteAsync("source|", MakeRec());
-        Assert.False(ok);
+        Assert.False(ok.Success);
     }
 
     [Fact]
     public async Task Execute_PayloadEmpty_ReturnsFalse()
     {
         var ok = await CreateSut().ExecuteAsync("", MakeRec());
-        Assert.False(ok);
+        Assert.False(ok.Success);
     }
 
     [Fact]
@@ -124,7 +124,7 @@ public class CopyFileExecutorTests : IDisposable
         var ok = await CreateSut().ExecuteAsync($"{src}|{dest}", MakeRec(), cts.Token);
         sw.Stop();
 
-        Assert.False(ok);
+        Assert.False(ok.Success);
         Assert.False(File.Exists(dest), "destination must not exist on cancel");
         Assert.False(File.Exists(dest + ".tmp"), "tmp must be cleaned up on cancel");
         Assert.True(sw.ElapsedMilliseconds < 2_000, $"cancel should be fast, took {sw.ElapsedMilliseconds}ms");
@@ -145,7 +145,7 @@ public class CopyFileExecutorTests : IDisposable
 
         var ok = await CreateSut().ExecuteAsync("{sourceFilePath}|dest", MakeRec());
 
-        Assert.False(ok);
+        Assert.False(ok.Success);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
