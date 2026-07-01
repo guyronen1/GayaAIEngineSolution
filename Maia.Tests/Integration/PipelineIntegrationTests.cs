@@ -34,6 +34,26 @@ public class PipelineIntegrationTests : IAsyncLifetime
         _db      = new MaiaDbContext(options);
         await _db.Database.EnsureCreatedAsync();
 
+        // Re-seed the classification RULE this pipeline depends on. The DTSX
+        // "DTS_E_CANNOTACQUIRECONNECTION" → DbConnection rule was dropped in
+        // AlignSeedModelRemoveDemoData (ErrorType lookups are still HasData-seeded).
+        // Point the rule at the seeded "DbConnection" ErrorType — add it only if
+        // absent — and let PKs auto-generate to avoid clashing with the seed.
+        // "DbConnection" maps to Retry + auto-heal in the built-in FixCatalogue.
+        var dbConn = await _db.ErrorTypes.FirstOrDefaultAsync(e => e.Code == "DbConnection");
+        if (dbConn is null)
+        {
+            dbConn = new ErrorType { Code = "DbConnection", DisplayName = "DB Connection", Severity = Severity.High };
+            _db.ErrorTypes.Add(dbConn);
+            await _db.SaveChangesAsync();
+        }
+        _db.ClassificationRules.Add(new ClassificationRule
+        {
+            JobTypeId = 1, ErrorTypeId = dbConn.ErrorTypeId,
+            Pattern = "DTS_E_CANNOTACQUIRECONNECTION", Confidence = 0.9m, Priority = 1,
+        });
+        await _db.SaveChangesAsync();
+
         _factory     = new TestDbContextFactory(options);
         _tempLogFile = Path.GetTempFileName();
     }
